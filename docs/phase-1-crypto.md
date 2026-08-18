@@ -1,6 +1,6 @@
 # Phase 1 — 加密核心 internal/crypto
 
-> 状态:未开始
+> 状态:已完成
 > 前置:Phase 0
 > 产出:`internal/crypto/`(format.go、keys.go、keyfile.go、blob.go + *_test.go)
 
@@ -15,13 +15,17 @@
 
 ## 要做什么(任务清单)
 
-- [ ] `go get golang.org/x/crypto`(argon2 / chacha20poly1305 / hkdf)
-- [ ] `format.go`:格式常量、`Meta` 结构(定长 100 字节编解码)
-- [ ] `keys.go`:`MasterKey` 类型、HKDF 密钥派生
-- [ ] `keyfile.go`:创建 / 解析 / 解锁 / Rewrap
-- [ ] `blob.go`:BlobWriter / BlobReader
-- [ ] 错误哨兵:`ErrBadPassphrase`、`ErrBadKeyFile`、`ErrCorruptBlob`、`ErrWrongKey`
-- [ ] 完整单测(清单见验收标准)
+- [x] `go get golang.org/x/crypto`(argon2 / chacha20poly1305 / hkdf)
+- [x] `format.go`:格式常量、`Meta` 结构(定长 100 字节编解码)
+- [x] `keys.go`:`MasterKey` 类型、HKDF 密钥派生
+- [x] `keyfile.go`:创建 / 解析 / 解锁 / Rewrap
+- [x] `blob.go`:BlobWriter / BlobReader
+- [x] 错误哨兵:`ErrBadPassphrase`、`ErrBadKeyFile`、`ErrCorruptBlob`、`ErrWrongKey`
+- [x] 完整单测(清单见验收标准)
+
+实施中追加的加固(测试驱动发现):
+- **Argon2 参数上界校验**(ParseKeyFile):被篡改的 keyfile 携带天文数字 memKiB/time 会把解锁变成内存耗尽攻击,解析期直接拒绝(上限 1GiB/16 次/64 线程)
+- **BlobReader 按块计数判结束**(而非剩余明文字节数):空文件的零长度末块也必须被读取并认证,否则终检误报"仍有剩余数据"
 
 ## 设计说明
 
