@@ -29,6 +29,12 @@ import (
 	"kist/internal/transfer"
 )
 
+// version/commit 由构建时 -ldflags 注入;直接 go run/build 时显示 dev。
+var (
+	version = "dev"
+	commit  = "unknown"
+)
+
 const usageText = `用法:kistctl <子命令> [参数]
 
 子命令:
@@ -44,7 +50,8 @@ const usageText = `用法:kistctl <子命令> [参数]
   rm      <id...>                        软删除文件
   gc      [--dry-run]                    清理 trash blob、报告孤儿
   backup  --pass-stdin                   加密备份索引到远端 index.enc
-  pull    --pass-stdin                   从远端恢复索引(新设备/多设备同步)`
+  pull    --pass-stdin                   从远端恢复索引(新设备/多设备同步)
+  version                               显示版本`
 
 func main() {
 	if err := run(os.Args[1:]); err != nil {
@@ -86,6 +93,8 @@ func run(args []string) error {
 		err = cmdBackup(rest)
 	case "pull":
 		err = cmdPull(rest)
+	case "version", "-v", "--version":
+		fmt.Printf("kistctl %s (%s)\n", version, commit)
 	default:
 		err = errs.New(errs.BadConfig, fmt.Sprintf("未知子命令 %q\n%s", cmd, usageText))
 	}

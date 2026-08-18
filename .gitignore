@@ -3,6 +3,9 @@
 *.out
 coverage.*
 
+# 发布产物
+dist/
+
 # Wails / 前端(Phase 6/7 脚手架合入后生效)
 frontend/node_modules/
 frontend/dist/
