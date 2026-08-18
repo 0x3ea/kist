@@ -1,6 +1,6 @@
 # Phase 3 — SQLite 明文索引 internal/index
 
-> 状态:未开始
+> 状态:已完成
 > 前置:Phase 1(仅 go.mod 共享,无代码依赖,可与 Phase 2 并行)
 > 产出:`internal/index/`(db.go、schema.go、folders.go、files.go、blobs.go + *_test.go)
 
@@ -10,14 +10,21 @@
 
 ## 要做什么(任务清单)
 
-- [ ] `go get modernc.org/sqlite`(纯 Go,无 CGO)
-- [ ] `schema.go`:内嵌 DDL + `PRAGMA user_version` 迁移
-- [ ] `db.go`:Open/Close/迁移/根目录/device_id/WithTx(revision)/快照与替换
-- [ ] `folders.go`:路径创建、目录列表、面包屑、软删
-- [ ] `files.go`:插入、查询、搜索、软删
-- [ ] `blobs.go`:远端对象登记与状态
-- [ ] `thumbnails.go`:缩略图存取;files 表增 `encrypted_at` / `note` / `user_meta` 列
-- [ ] 全套单测
+- [x] `go get modernc.org/sqlite`(纯 Go,无 CGO)
+- [x] `schema.go`:内嵌 DDL + `PRAGMA user_version` 迁移
+- [x] `db.go`:Open/Close/迁移/根目录/device_id/WithTx(revision)/快照与替换
+- [x] `folders.go`:路径创建、目录列表、面包屑、软删
+- [x] `files.go`:插入、查询、搜索、软删
+- [x] `blobs.go`:远端对象登记与状态
+- [x] `thumbnails.go`:缩略图存取;files 表增 `encrypted_at` / `note` / `user_meta` 列
+- [x] 全套单测
+
+实施要点(与文档设计的差异说明):
+- PRAGMA 全部挂在 DSN(`file:path?_pragma=...`)而非 Open 后 Exec——database/sql 连接池里每条连接都要生效,后者只会作用到当时那条连接
+- `Revision()`/`DeviceID()` 返回 `(值, error)` 而非裸值
+- `SetLastBackupAt` 直写不经 WithTx:它是本地簿记不是内容变更,若参与 revision 会造成"备份→变更→再备份"循环
+- `ReplaceWith` 先 `wal_checkpoint(TRUNCATE)` 再关库,替换后清理旧 `-wal`/`-shm` 残留;失败路径尽力重开句柄
+- 搜索结果的祖先过滤:一次性载入目录表,任一祖先软删则该文件不计入
 
 ## 设计说明
 

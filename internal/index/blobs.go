@@ -1,0 +1,44 @@
+package index
+
+import "database/sql"
+
+// RegisterBlob 在事务内登记一个远端对象(与 InsertFile 同事务,
+// 保证"索引有记录 ⟺ 对象已登记")。
+func (db *DB) RegisterBlob(tx *sql.Tx, name, kind string, size int64) error {
+	_, err := tx.Exec(
+		`INSERT OR REPLACE INTO blobs (name, size, kind, state, created_at) VALUES (?,?,?,'active',?)`,
+		name, size, kind, now())
+	return err
+}
+
+// MarkBlobTrash 把对象标记为待清理;物理删除由孤儿清理流程确认远端状态后执行。
+func (db *DB) MarkBlobTrash(names []string) error {
+	if len(names) == 0 {
+		return nil
+	}
+	return db.WithTx(func(tx *sql.Tx) error {
+		_, err := tx.Exec(
+			`UPDATE blobs SET state = 'trash' WHERE name IN (`+placeholders(len(names))+`)`,
+			toAny(names)...)
+		return err
+	})
+}
+
+// ListBlobStates 返回全部已登记对象的 name → state 映射,
+// 与远端 PROPFIND 结果做 diff 即可得到孤儿与待删清单。
+func (db *DB) ListBlobStates() (map[string]string, error) {
+	rows, err := db.Query(`SELECT name, state FROM blobs`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	m := map[string]string{}
+	for rows.Next() {
+		var name, state string
+		if err := rows.Scan(&name, &state); err != nil {
+			return nil, err
+		}
+		m[name] = state
+	}
+	return m, rows.Err()
+}
