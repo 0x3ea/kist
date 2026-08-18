@@ -19,6 +19,7 @@ import (
 	"sync"
 	"time"
 
+	"kist/internal/backup"
 	"kist/internal/config"
 	"kist/internal/crypto"
 	"kist/internal/dav"
@@ -42,8 +43,8 @@ const usageText = `用法:kistctl <子命令> [参数]
   note    <id> [--set 文本]              查看/设置备注
   rm      <id...>                        软删除文件
   gc      [--dry-run]                    清理 trash blob、报告孤儿
-  backup                                  (Phase 5)备份索引到远端
-  pull    --pass-stdin                   (Phase 5)从远端恢复索引`
+  backup  --pass-stdin                   加密备份索引到远端 index.enc
+  pull    --pass-stdin                   从远端恢复索引(新设备/多设备同步)`
 
 func main() {
 	if err := run(os.Args[1:]); err != nil {
@@ -81,6 +82,10 @@ func run(args []string) error {
 		err = cmdRm(rest)
 	case "gc":
 		err = cmdGc(rest)
+	case "backup":
+		err = cmdBackup(rest)
+	case "pull":
+		err = cmdPull(rest)
 	default:
 		err = errs.New(errs.BadConfig, fmt.Sprintf("未知子命令 %q\n%s", cmd, usageText))
 	}
@@ -734,6 +739,79 @@ func cmdGc(args []string) error {
 	}
 	for _, n := range orphans {
 		fmt.Printf("孤儿(远端有、索引无,未删除): %s\n", n)
+	}
+	return nil
+}
+
+func cmdBackup(args []string) error {
+	fs := flag.NewFlagSet("backup", flag.ContinueOnError)
+	passStdin := passStdinFlag(fs)
+	if err := parseArgs(fs, args); err != nil {
+		return err
+	}
+	pass, err := readPass(*passStdin)
+	if err != nil {
+		return err
+	}
+	_, store, err := loadStore()
+	if err != nil {
+		return err
+	}
+	mk, err := unlockMK(store, pass)
+	if err != nil {
+		return err
+	}
+	db, err := openIndex()
+	if err != nil {
+		return err
+	}
+	defer db.Close()
+	info, err := backup.BackupNow(context.Background(), mk, db, store)
+	if err != nil {
+		return errs.From(err)
+	}
+	fmt.Printf("备份完成:revision %d,加密后 %d 字节,%s\n",
+		info.Revision, info.Size, info.At.Format("2006-01-02 15:04:05"))
+	return nil
+}
+
+func cmdPull(args []string) error {
+	fs := flag.NewFlagSet("pull", flag.ContinueOnError)
+	passStdin := passStdinFlag(fs)
+	if err := parseArgs(fs, args); err != nil {
+		return err
+	}
+	pass, err := readPass(*passStdin)
+	if err != nil {
+		return err
+	}
+	_, store, err := loadStore()
+	if err != nil {
+		return err
+	}
+	// 本地无 keyfile 时 unlockMK 内部会自动从远端拉取并缓存(新设备路径)
+	mk, err := unlockMK(store, pass)
+	if err != nil {
+		return err
+	}
+	db, err := openIndex()
+	if err != nil {
+		return err
+	}
+	defer db.Close()
+	res, err := backup.PullRemote(context.Background(), mk, store, db)
+	if err != nil {
+		return errs.From(err)
+	}
+	switch res.Action {
+	case "replaced":
+		fmt.Printf("已从远端恢复索引(远端 revision %d > 本地 %d,来自设备 %s);旧库已归档在 backups/ 目录\n",
+			res.RemoteRev, res.LocalRev, res.RemoteDevice)
+	case "noop":
+		fmt.Printf("本地与远端同版本(revision %d),无需恢复\n", res.LocalRev)
+	case "local-newer":
+		fmt.Printf("本地索引(revision %d)比远端(%d)新,未改动本地;建议先 kistctl backup 推送\n",
+			res.LocalRev, res.RemoteRev)
 	}
 	return nil
 }

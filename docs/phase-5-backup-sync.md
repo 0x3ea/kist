@@ -1,6 +1,6 @@
 # Phase 5 — 索引云备份与多设备恢复(CLI)internal/backup
 
-> 状态:未开始
+> 状态:已完成(CLI 部分;GUI 接线在 Phase 7)
 > 前置:Phase 4
 > 产出:`internal/backup/backup.go` + 测试;`remote.Store` 增 index blob 方法;`kistctl backup/pull`;e2e 双设备场景
 > (GUI 侧的接线——按钮、新设备向导、自动备份——在 Phase 7 落地)
@@ -11,10 +11,15 @@
 
 ## 要做什么(任务清单)
 
-- [ ] `remote.Store` 增 `PutIndexBlob(f *os.File)` / `GetIndexBlob(tmpPath string) error`(远端固定名 `/kist/index.enc`)
-- [ ] `internal/backup`:BackupNow / PullRemote(LWW)
-- [ ] `kistctl backup` / `kistctl pull` 子命令
-- [ ] e2e 扩展:双 KIST_HOME 家目录互推与冲突归档
+- [x] `remote.Store` 增 `PutIndexBlob(f *os.File)` / `GetIndexBlob(tmpPath string) error`(远端固定名 `/kist/index.enc`)
+- [x] `internal/backup`:BackupNow / PullRemote(LWW)
+- [x] `kistctl backup` / `kistctl pull` 子命令
+- [x] e2e 扩展:双 KIST_HOME 家目录互推与冲突归档
+
+实施要点:
+- **替换前必须完整解密**:PullRemote 先读头部 Meta 做 LWW 决策,决定替换后把整个备份流式解密(块认证 + 明文 SHA 终检全部通过)才调 ReplaceWith——防止把损坏的快照装进本地;损坏测试验证了这条路径
+- revision/device 在快照前读取,保证 Meta 里的值与快照内容一致
+- `kistctl pull` 复用 unlockMK:本地无 keyfile 时自动从远端拉取缓存(新设备路径),错口令在 keyfile 解包时即被拒(AUTH_FAILED)
 
 ## 设计说明
 

@@ -119,3 +119,14 @@ func (s *Store) ListBlobs(ctx context.Context) ([]string, error) {
 func (s *Store) DeleteBlob(ctx context.Context, name string) error {
 	return s.c.Delete(ctx, s.path(name))
 }
+
+// PutIndexBlob 上传加密索引备份(远端固定名 index.enc)。
+func (s *Store) PutIndexBlob(ctx context.Context, f *os.File) error {
+	return s.c.PutFile(ctx, s.path(IndexName), f, nil)
+}
+
+// GetIndexBlob 下载索引备份到本地路径;从未备份过时返回 404 类错误。
+func (s *Store) GetIndexBlob(ctx context.Context, tmpPath string) error {
+	_, err := s.c.GetToFile(ctx, s.path(IndexName), tmpPath, nil)
+	return err
+}
