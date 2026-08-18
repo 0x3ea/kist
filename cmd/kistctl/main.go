@@ -214,15 +214,23 @@ func unlockMK(store *remote.Store, pass string) (crypto.MasterKey, error) {
 	return mk, nil
 }
 
-// splitVirtualPath 把 "/a/b" 拆成 ["a","b"];"/" 与 "" 返回空。
-func splitVirtualPath(p string) []string {
+// splitVirtualPath 把虚拟目录路径 "/a/b" 拆成 ["a","b"]。
+// 容忍空段与 "."(如手滑写 "./result");".." 直接报错——
+// 虚拟路径从根写起,不存在向上逃逸。
+func splitVirtualPath(p string) ([]string, error) {
 	var segs []string
 	for _, s := range strings.Split(strings.TrimSpace(p), "/") {
-		if s != "" {
+		switch s {
+		case "", ".":
+			continue
+		case "..":
+			return nil, errs.New(errs.BadConfig,
+				"虚拟目录路径不支持 \"..\":请从根写起,如 /测试/子目录")
+		default:
 			segs = append(segs, s)
 		}
 	}
-	return segs
+	return segs, nil
 }
 
 // ---- 子命令实现 ----
@@ -438,7 +446,10 @@ func cmdPut(args []string) error {
 	}
 	defer db.Close()
 
-	segs := splitVirtualPath(*dest)
+	segs, err := splitVirtualPath(*dest)
+	if err != nil {
+		return err
+	}
 	folderID := int64(1)
 	if len(segs) > 0 {
 		if err := db.WithTx(func(tx *sql.Tx) error {
@@ -475,7 +486,11 @@ func cmdLs(args []string) error {
 		return err
 	}
 	defer db.Close()
-	folderID, err := db.ResolveFolderPath(splitVirtualPath(path))
+	segs, err := splitVirtualPath(path)
+	if err != nil {
+		return err
+	}
+	folderID, err := db.ResolveFolderPath(segs)
 	if err != nil {
 		return errs.From(err)
 	}
