@@ -6,6 +6,10 @@ coverage.*
 # 发布产物
 dist/
 
+# 本地试用:仓库根的 kistctl 链接与沙盒数据目录(不污染系统 PATH 与配置目录)
+/kistctl
+/.sandbox/
+
 # Wails / 前端(Phase 6/7 脚手架合入后生效)
 frontend/node_modules/
 frontend/dist/
