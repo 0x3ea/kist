@@ -1,0 +1,7 @@
+#!/bin/sh
+# 沙盒模式包装:数据根目录固定在项目内 .sandbox/,与正式环境
+# (~/.config/kist)完全隔离;外显 KIST_HOME 优先,便于临时指到别处。
+# 用法与 kistctl 完全相同:./kistctl-sandbox put ~/文件 --dest /测试
+set -e
+DIR=$(cd "$(dirname "$0")" && pwd)
+KIST_HOME="${KIST_HOME:-$DIR/.sandbox}" exec "$DIR/kistctl" "$@"

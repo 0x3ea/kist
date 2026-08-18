@@ -19,6 +19,26 @@ mkdir -p ~/bin && ln -s "$PWD/dist/kistctl-v0.1.0-linux-amd64" ~/bin/kistctl
 # Windows:dist/kistctl-v0.1.0-windows-amd64.exe 直接运行
 ```
 
+## 沙盒试用(推荐先用这个)
+
+不想动 `~/bin` 和 `~/.config/kist`?仓库根提供了包装脚本 `kistctl-sandbox`:
+数据全部落在项目内 `.sandbox/`(已 gitignore),命令用法与 `kistctl` 完全相同。
+清空重来只需 `rm -rf .sandbox`。
+
+```bash
+ln -sf dist/kistctl-v0.1.0-linux-amd64 kistctl   # 仓库根链接(一次性,已 gitignore)
+echo "网盘密码" | ./kistctl-sandbox config set --url https://dav.example.com/dav --user 用户名 --pass-stdin
+KIST_PASS='我的加密口令' ./kistctl-sandbox init --pass-stdin
+```
+
+等价的手写方式是给每条命令加前缀(命令级环境变量,不污染会话):
+
+```bash
+KIST_HOME="$PWD/.sandbox" ./kistctl put ~/文件 --dest /测试
+```
+
+注意:沙盒与正式模式若连同一个网盘,远端只有一份 keyfile——一边 init 过,另一边直接 pull,不要再 init。
+
 ## 首次配置(两个密码,别混淆)
 
 ```bash
