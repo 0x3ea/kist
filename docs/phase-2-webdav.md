@@ -1,6 +1,6 @@
 # Phase 2 — WebDAV 客户端层 internal/dav
 
-> 状态:未开始
+> 状态:已完成
 > 前置:Phase 1(仅 go.mod 共享,无代码依赖,可与 Phase 3 并行)
 > 产出:`internal/dav/`(client.go、retry.go、client_test.go)
 
@@ -10,10 +10,17 @@
 
 ## 要做什么(任务清单)
 
-- [ ] `go get github.com/studio-b12/gowebdav golang.org/x/net`
-- [ ] `retry.go`:可注入睡眠的退避重试器
-- [ ] `client.go`:Client 接口 + gowebdav 实现 + 自实现 `PutFile`
-- [ ] `client_test.go`:httptest + x/net/webdav 内存文件系统的全套测试(含故障注入)
+- [x] `go get github.com/studio-b12/gowebdav golang.org/x/net`
+- [x] `retry.go`:可注入睡眠的退避重试器
+- [x] `client.go`:Client 接口 + gowebdav 实现 + 自实现 `PutFile`
+- [x] `client_test.go`:httptest + x/net/webdav 内存文件系统的全套测试(含故障注入)
+
+实施要点(与文档设计的差异说明):
+- 所有 Client 方法第一个参数为 `ctx`(文档签名没写):PUT/GET 挂在请求上可中途取消,其余操作在重试边界检查
+- PUT 请求体必须用 `SectionReader + NoCloser` 包装而不能直接传 `*os.File`:`http.Transport` 结束请求时会 Close 请求体,裸传文件句柄在首次重试时已关闭(测试驱动发现);`GetBody` 一并补齐以支持 307/308 重定向
+- 分工:PUT/GET 自管 `http.Client`(需要 ctx/Content-Length/Retry-After 头),PROPFIND/MKCOL/DELETE/MOVE 复用 gowebdav v0.13.0(其 `StatusError` 包在 `*os.PathError` 里,`IsErrCode`/`statusCodeOf` 做统一分类)
+- `isRetryable` 先排除 `context.Canceled/DeadlineExceeded`:`*url.Error` 实现了 `net.Error`,否则 ctx 取消会被误判为可重试
+- gowebdav 方法本身不带 ctx,取消粒度为"重试边界"(自管 PUT/GET 为传输中途)
 
 ## 设计说明
 

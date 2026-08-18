@@ -1,0 +1,270 @@
+package dav
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"io"
+	"net"
+	"net/http"
+	"net/url"
+	"os"
+	"strconv"
+	"strings"
+	"time"
+
+	"github.com/studio-b12/gowebdav"
+)
+
+// Config 是 WebDAV 连接配置;RootPath 为远端对象根目录,默认 "/kist"。
+type Config struct {
+	URL      string
+	Username string
+	Password string
+	RootPath string
+}
+
+// RemoteObject 是远端根目录下的一个对象(PROPFIND Depth 1 的结果项)。
+type RemoteObject struct {
+	Name    string
+	Size    int64
+	ModTime time.Time
+}
+
+// Client 是本包对外暴露的最小 WebDAV 语义;所有方法接受 ctx 用于取消控制。
+// 网络可靠性(重试/退避/429)全部封装在实现里,上层不感知 HTTP。
+type Client interface {
+	// Ping 验证地址与凭据可用。
+	Ping(ctx context.Context) error
+	// EnsureRoot 创建根目录;已存在(405)视为成功,幂等。
+	EnsureRoot(ctx context.Context) error
+	// PutFile 整文件上传:显式设置 Content-Length(部分保守网盘拒绝
+	// chunked 编码的 PUT);失败整体重试,每次重试把文件 Seek 回开头。
+	PutFile(ctx context.Context, remotePath string, f *os.File) error
+	// GetToFile 流式下载到本地文件;prog 以累计字节回调(64KiB 粒度,
+	// 节流由上层负责;重试会从头重传,prog 可能回退后再增长)。
+	GetToFile(ctx context.Context, remotePath, localPath string, prog func(int64)) (int64, error)
+	// List 列出根目录下的全部对象。
+	List(ctx context.Context) ([]RemoteObject, error)
+	Delete(ctx context.Context, remotePath string) error
+	Move(ctx context.Context, oldPath, newPath string) error
+}
+
+type client struct {
+	cfg   Config
+	gc    *gowebdav.Client // PROPFIND/MKCOL/DELETE/MOVE:复用其解析与多状态处理
+	hc    *http.Client     // PUT/GET 自管:需要 ctx、Content-Length 与 Retry-After
+	retry *Retrier
+}
+
+// New 构造客户端;URL 必填,RootPath 缺省 "/kist"。
+func New(cfg Config) (Client, error) {
+	if cfg.URL == "" {
+		return nil, fmt.Errorf("dav: URL 未配置")
+	}
+	if cfg.RootPath == "" {
+		cfg.RootPath = "/kist"
+	}
+	cfg.RootPath = "/" + strings.Trim(cfg.RootPath, "/")
+	gc := gowebdav.NewClient(cfg.URL, cfg.Username, cfg.Password)
+	// 不设整体 Timeout:大文件传输的时限由调用方 ctx 控制,
+	// 这里只约束建立连接与等待响应头两个阶段
+	hc := &http.Client{
+		Transport: &http.Transport{
+			DialContext:           (&net.Dialer{Timeout: 30 * time.Second, KeepAlive: 30 * time.Second}).DialContext,
+			TLSHandshakeTimeout:   15 * time.Second,
+			ResponseHeaderTimeout: 60 * time.Second,
+			MaxIdleConnsPerHost:   4,
+			IdleConnTimeout:       90 * time.Second,
+		},
+	}
+	return &client{cfg: cfg, gc: gc, hc: hc, retry: NewRetrier()}, nil
+}
+
+func (c *client) Ping(ctx context.Context) error {
+	return c.retry.Do(ctx, func() error { return c.gc.Connect() })
+}
+
+func (c *client) EnsureRoot(ctx context.Context) error {
+	return c.retry.Do(ctx, func() error {
+		err := c.gc.Mkdir(c.cfg.RootPath, 0o755)
+		if err != nil && gowebdav.IsErrCode(err, http.StatusMethodNotAllowed) {
+			return nil // 405 = 目录已存在,MKCOL 的预期幂等结果
+		}
+		return err
+	})
+}
+
+func (c *client) PutFile(ctx context.Context, remotePath string, f *os.File) error {
+	st, err := f.Stat()
+	if err != nil {
+		return err
+	}
+	return c.retry.Do(ctx, func() error {
+		// http.Transport 结束请求时会 Close 请求体——直接把 *os.File 当 body,
+		// 首次尝试后句柄就被关掉,重试必失败(测试驱动发现)。
+		// 用 SectionReader + NoCloser 包装:每次尝试从偏移 0 重新读,
+		// 句柄生命周期留在调用方手里。
+		body := io.NopCloser(io.NewSectionReader(f, 0, st.Size()))
+		req, err := http.NewRequestWithContext(ctx, http.MethodPut, c.url(remotePath), body)
+		if err != nil {
+			return err
+		}
+		req.ContentLength = st.Size()                 // 关键:带定长,避免 chunked 编码
+		req.GetBody = func() (io.ReadCloser, error) { // 支持极少数网盘的 307/308 重定向重发
+			return io.NopCloser(io.NewSectionReader(f, 0, st.Size())), nil
+		}
+		c.auth(req)
+		resp, err := c.hc.Do(req)
+		if err != nil {
+			return err
+		}
+		defer resp.Body.Close()
+		_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 4<<10)) // 排空以便复用连接
+		if resp.StatusCode >= 200 && resp.StatusCode < 300 {
+			return nil
+		}
+		return &StatusError{Op: "PUT", Path: remotePath, Code: resp.StatusCode,
+			RetryAfter: parseRetryAfter(resp.Header.Get("Retry-After"))}
+	})
+}
+
+func (c *client) GetToFile(ctx context.Context, remotePath, localPath string, prog func(int64)) (n int64, err error) {
+	err = c.retry.Do(ctx, func() error {
+		req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.url(remotePath), nil)
+		if err != nil {
+			return err
+		}
+		c.auth(req)
+		resp, err := c.hc.Do(req)
+		if err != nil {
+			return err
+		}
+		defer resp.Body.Close()
+		if resp.StatusCode >= 400 {
+			_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 4<<10))
+			return &StatusError{Op: "GET", Path: remotePath, Code: resp.StatusCode,
+				RetryAfter: parseRetryAfter(resp.Header.Get("Retry-After"))}
+		}
+		out, err := os.OpenFile(localPath, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0o600)
+		if err != nil {
+			return err
+		}
+		defer out.Close()
+		w, err := copyWithProg(out, resp.Body, prog)
+		if err != nil {
+			return err
+		}
+		n = w
+		return nil
+	})
+	return n, err
+}
+
+func copyWithProg(dst io.Writer, src io.Reader, prog func(int64)) (int64, error) {
+	buf := make([]byte, 64<<10)
+	var total int64
+	for {
+		n, rerr := src.Read(buf)
+		if n > 0 {
+			if _, werr := dst.Write(buf[:n]); werr != nil {
+				return total, werr
+			}
+			total += int64(n)
+			if prog != nil {
+				prog(total)
+			}
+		}
+		if rerr == io.EOF {
+			return total, nil
+		}
+		if rerr != nil {
+			return total, rerr
+		}
+	}
+}
+
+func (c *client) List(ctx context.Context) ([]RemoteObject, error) {
+	var out []RemoteObject
+	err := c.retry.Do(ctx, func() error {
+		fis, err := c.gc.ReadDir(c.cfg.RootPath)
+		if err != nil {
+			return err
+		}
+		out = make([]RemoteObject, 0, len(fis))
+		for _, fi := range fis {
+			out = append(out, RemoteObject{Name: fi.Name(), Size: fi.Size(), ModTime: fi.ModTime()})
+		}
+		return nil
+	})
+	return out, err
+}
+
+func (c *client) Delete(ctx context.Context, remotePath string) error {
+	return c.retry.Do(ctx, func() error { return c.gc.Remove(remotePath) })
+}
+
+func (c *client) Move(ctx context.Context, oldPath, newPath string) error {
+	return c.retry.Do(ctx, func() error { return c.gc.Rename(oldPath, newPath, false) })
+}
+
+func (c *client) auth(req *http.Request) {
+	if c.cfg.Username != "" || c.cfg.Password != "" {
+		req.SetBasicAuth(c.cfg.Username, c.cfg.Password)
+	}
+}
+
+// url 拼出绝对地址;路径逐段转义、保留 "/"(对象名是 32hex 本无特殊字符,
+// 转义只是对异常路径的保险)。
+func (c *client) url(remotePath string) string {
+	p := remotePath
+	if !strings.HasPrefix(p, "/") {
+		p = "/" + p
+	}
+	return strings.TrimRight(c.cfg.URL, "/") + escapePath(p)
+}
+
+func escapePath(p string) string {
+	segs := strings.Split(p, "/")
+	for i, s := range segs {
+		segs[i] = url.PathEscape(s)
+	}
+	return strings.Join(segs, "/")
+}
+
+// StatusError 是自管请求(PUT/GET)的错误,携带状态码与 Retry-After 时长。
+type StatusError struct {
+	Op         string
+	Path       string
+	Code       int
+	RetryAfter time.Duration // 0 表示服务端未提供
+}
+
+func (e *StatusError) Error() string {
+	return fmt.Sprintf("dav: %s %s: HTTP %d", e.Op, e.Path, e.Code)
+}
+
+// parseRetryAfter 只识别"秒数"形式;HTTP-date 形式忽略(由常规退避兜底)。
+func parseRetryAfter(v string) time.Duration {
+	if v == "" {
+		return 0
+	}
+	if sec, err := strconv.Atoi(v); err == nil && sec > 0 {
+		return time.Duration(sec) * time.Second
+	}
+	return 0
+}
+
+// statusCodeOf 从 gowebdav 返回的 *os.PathError 中剥出 HTTP 状态码。
+func statusCodeOf(err error) (int, bool) {
+	var pe *os.PathError
+	if errors.As(err, &pe) {
+		if se, ok := pe.Err.(gowebdav.StatusError); ok {
+			return se.Status, true
+		}
+	}
+	if se, ok := err.(gowebdav.StatusError); ok {
+		return se.Status, true
+	}
+	return 0, false
+}
