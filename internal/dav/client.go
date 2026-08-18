@@ -39,8 +39,9 @@ type Client interface {
 	// EnsureRoot 创建根目录;已存在(405)视为成功,幂等。
 	EnsureRoot(ctx context.Context) error
 	// PutFile 整文件上传:显式设置 Content-Length(部分保守网盘拒绝
-	// chunked 编码的 PUT);失败整体重试,每次重试把文件 Seek 回开头。
-	PutFile(ctx context.Context, remotePath string, f *os.File) error
+	// chunked 编码的 PUT);失败整体重试,每次重试从头重传;
+	// prog 以密文累计字节回调(64KiB 粒度,可为 nil)。
+	PutFile(ctx context.Context, remotePath string, f *os.File, prog func(int64)) error
 	// GetToFile 流式下载到本地文件;prog 以累计字节回调(64KiB 粒度,
 	// 节流由上层负责;重试会从头重传,prog 可能回退后再增长)。
 	GetToFile(ctx context.Context, remotePath, localPath string, prog func(int64)) (int64, error)
@@ -95,7 +96,7 @@ func (c *client) EnsureRoot(ctx context.Context) error {
 	})
 }
 
-func (c *client) PutFile(ctx context.Context, remotePath string, f *os.File) error {
+func (c *client) PutFile(ctx context.Context, remotePath string, f *os.File, prog func(int64)) error {
 	st, err := f.Stat()
 	if err != nil {
 		return err
@@ -104,16 +105,17 @@ func (c *client) PutFile(ctx context.Context, remotePath string, f *os.File) err
 		// http.Transport 结束请求时会 Close 请求体——直接把 *os.File 当 body,
 		// 首次尝试后句柄就被关掉,重试必失败(测试驱动发现)。
 		// 用 SectionReader + NoCloser 包装:每次尝试从偏移 0 重新读,
-		// 句柄生命周期留在调用方手里。
-		body := io.NopCloser(io.NewSectionReader(f, 0, st.Size()))
+		// 句柄生命周期留在调用方手里;外层 progressReader 顺带上报进度。
+		rd := func() (io.ReadCloser, error) {
+			return io.NopCloser(&progressReader{r: io.NewSectionReader(f, 0, st.Size()), prog: prog}), nil
+		}
+		body, _ := rd()
 		req, err := http.NewRequestWithContext(ctx, http.MethodPut, c.url(remotePath), body)
 		if err != nil {
 			return err
 		}
-		req.ContentLength = st.Size()                 // 关键:带定长,避免 chunked 编码
-		req.GetBody = func() (io.ReadCloser, error) { // 支持极少数网盘的 307/308 重定向重发
-			return io.NopCloser(io.NewSectionReader(f, 0, st.Size())), nil
-		}
+		req.ContentLength = st.Size() // 关键:带定长,避免 chunked 编码
+		req.GetBody = rd              // 支持极少数网盘的 307/308 重定向重发
 		c.auth(req)
 		resp, err := c.hc.Do(req)
 		if err != nil {
@@ -158,6 +160,22 @@ func (c *client) GetToFile(ctx context.Context, remotePath, localPath string, pr
 		n = w
 		return nil
 	})
+	return n, err
+}
+
+// progressReader 把读取量转成累计字节回调。
+type progressReader struct {
+	r    io.Reader
+	n    int64
+	prog func(int64)
+}
+
+func (p *progressReader) Read(b []byte) (int, error) {
+	n, err := p.r.Read(b)
+	if n > 0 && p.prog != nil {
+		p.n += int64(n)
+		p.prog(p.n)
+	}
 	return n, err
 }
 

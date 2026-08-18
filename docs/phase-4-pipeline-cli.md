@@ -1,6 +1,6 @@
 # Phase 4 — 远端语义 / 传输管线 / CLI 端到端打通
 
-> 状态:未开始
+> 状态:已完成
 > 前置:Phase 1、2、3
 > 产出:`internal/remote/store.go`、`internal/config/config.go`、`internal/errs/errs.go`、`internal/transfer/`(manager.go、upload.go、download.go、tempfiles.go)、`cmd/kistctl/main.go`、`internal/e2e/e2e_test.go`
 
@@ -10,14 +10,23 @@
 
 ## 要做什么(任务清单)
 
-- [ ] `internal/config`:KIST_HOME 覆盖、config.json 读写(0600)
-- [ ] `internal/errs`:AppError 错误码
-- [ ] `internal/remote`:远端对象语义(keyfile / blob / index.enc)
-- [ ] `internal/transfer`:Manager(worker 池、进度、取消、临时文件)
-- [ ] 缩略图生成:图片上传时自动产出(`golang.org/x/image`,纯 Go)
-- [ ] `cmd/kistctl`:全部子命令
-- [ ] `internal/e2e`:本地 WebDAV 上的全链路测试
-- [ ] (可选)真实网盘手动演练
+- [x] `internal/config`:KIST_HOME 覆盖、config.json 读写(0600)
+- [x] `internal/errs`:AppError 错误码
+- [x] `internal/remote`:远端对象语义(keyfile / blob / index.enc)
+- [x] `internal/transfer`:Manager(worker 池、进度、取消、临时文件)
+- [x] 缩略图生成:图片上传时自动产出(`golang.org/x/image`,纯 Go)
+- [x] `cmd/kistctl`:全部子命令
+- [x] `internal/e2e`:本地 WebDAV 上的全链路测试
+- [x] 真实 CLI 冒烟演练(本地 WebDAV 服务,全命令生命周期通过)
+
+实施要点(与文档设计的差异与补充):
+- **DSN 加 `_txlock=immediate`**(CLI 冒烟发现):并发上传的索引写事务用 BEGIN IMMEDIATE 排队等 busy_timeout,修复 deferred 事务升级写锁时的 SQLITE_BUSY
+- 同名消解放在**索引事务内**(`index.UniqueFileName`),而非入队时检查:blob 名(随机)与文件名无关,并发上传不会撞名
+- dav.Client.PutFile 增加 prog 参数;index 增加 `UniqueFileName`/`ResolveFolderPath`
+- Manager 用 sync.Cond 单调度器:并发上限每轮重读(改设置即时生效),进度事件 200ms 节流,每任务独立 ctx
+- 上传文件夹时**文件夹自身名构成第一级目录**(put ./资料 --dest /测试 → /测试/资料/...);目录 id 逐级记录(只记最深一级会让文件夹根下的文件拿到零值 folderID 触发外键失败)
+- CLI 参数重排(`parseArgs`):Go flag 遇首个位置参数即停止解析,重排后允许 `put /路径 --dest /x` 混写
+- gc 实现为 `transfer.RunGC`(CLI 与 GUI 共用);remote.Store 增 Ping
 
 ## 设计说明
 

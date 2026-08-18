@@ -364,6 +364,56 @@ func TestGetFileByUUID(t *testing.T) {
 	}
 }
 
+func TestUniqueFileName(t *testing.T) {
+	db := newTestDB(t)
+	a := mustFolder(t, db, "a")
+	mustFile(t, db, a, "报告.pdf", "")
+	resolve := func() string {
+		var got string
+		err := db.WithTx(func(tx *sql.Tx) error {
+			var err error
+			got, err = db.UniqueFileName(tx, a, "报告.pdf")
+			return err
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return got
+	}
+	if got := resolve(); got != "报告 (1).pdf" {
+		t.Fatalf("第一次冲突应得 \"报告 (1).pdf\",得到 %q", got)
+	}
+	mustFile(t, db, a, "报告 (1).pdf", "")
+	if got := resolve(); got != "报告 (2).pdf" {
+		t.Fatalf("第二次冲突应得 \"报告 (2).pdf\",得到 %q", got)
+	}
+	// 根目录同名不受 a 目录影响
+	var got string
+	err := db.WithTx(func(tx *sql.Tx) error {
+		var err error
+		got, err = db.UniqueFileName(tx, 1, "报告.pdf")
+		return err
+	})
+	if err != nil || got != "报告.pdf" {
+		t.Fatalf("不同目录不应消解: %q %v", got, err)
+	}
+}
+
+func TestResolveFolderPath(t *testing.T) {
+	db := newTestDB(t)
+	ab := mustFolder(t, db, "a", "b")
+	id, err := db.ResolveFolderPath([]string{"a", "b"})
+	if err != nil || id != ab {
+		t.Fatalf("解析 a/b: id=%d 期望 %d, err=%v", id, ab, err)
+	}
+	if root, err := db.ResolveFolderPath(nil); err != nil || root != 1 {
+		t.Fatalf("空路径应解析到根: %d %v", root, err)
+	}
+	if _, err := db.ResolveFolderPath([]string{"a", "x"}); err == nil {
+		t.Fatal("缺失目录应报错")
+	}
+}
+
 func TestBlobs(t *testing.T) {
 	db := newTestDB(t)
 	id := mustFile(t, db, 1, "b.txt", "")

@@ -2,6 +2,7 @@ package index
 
 import (
 	"database/sql"
+	"fmt"
 	"strings"
 )
 
@@ -155,6 +156,49 @@ func (db *DB) SoftDeleteFiles(ids []int64) error {
 			append([]any{now()}, toAny(ids)...)...)
 		return err
 	})
+}
+
+// UniqueFileName 在同一目录内为 name 找不冲突的名字:冲突时追加 "(1)"、"(2)"…。
+// 必须在写文件记录的同一事务内调用——上传管线的 blob 名与文件名无关,
+// 把重名消解推迟到索引事务,并发上传也不会撞名。
+func (db *DB) UniqueFileName(tx *sql.Tx, folderID int64, name string) (string, error) {
+	taken, err := nameTakenTx(tx, folderID, name)
+	if err != nil {
+		return "", err
+	}
+	if !taken {
+		return name, nil
+	}
+	ext := ""
+	if i := strings.LastIndex(name, "."); i > 0 {
+		ext = name[i:]
+	}
+	base := strings.TrimSuffix(name, ext)
+	for i := 1; i <= 9999; i++ {
+		candidate := fmt.Sprintf("%s (%d)%s", base, i, ext)
+		taken, err := nameTakenTx(tx, folderID, candidate)
+		if err != nil {
+			return "", err
+		}
+		if !taken {
+			return candidate, nil
+		}
+	}
+	return "", fmt.Errorf("index: 目录 %d 内 %q 的重名消解超出上限", folderID, name)
+}
+
+func nameTakenTx(tx *sql.Tx, folderID int64, name string) (bool, error) {
+	var one int
+	err := tx.QueryRow(
+		`SELECT 1 FROM files WHERE folder_id = ? AND name = ? AND deleted_at IS NULL LIMIT 1`,
+		folderID, name).Scan(&one)
+	if err == sql.ErrNoRows {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	return true, nil
 }
 
 // folderInfo 供虚拟路径拼接:一次载入全部目录(个人规模下目录数很小)。

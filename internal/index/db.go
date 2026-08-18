@@ -28,11 +28,14 @@ func Open(path string) (*DB, error) {
 		return nil, err
 	}
 	// PRAGMA 必须挂在 DSN 上:database/sql 连接池的每条连接都要生效,
-	// Open 之后逐条 Exec 只会作用到当时那条连接
+	// Open 之后逐条 Exec 只会作用到当时那条连接。
+	// _txlock=immediate 让写事务用 BEGIN IMMEDIATE:并发写者直接排队
+	// 等 busy_timeout,而不是 deferred 事务升级写锁时撞出 SQLITE_BUSY。
 	q := make(url.Values)
 	q.Add("_pragma", "busy_timeout(5000)")
 	q.Add("_pragma", "journal_mode(WAL)")
 	q.Add("_pragma", "foreign_keys(1)")
+	q.Add("_txlock", "immediate")
 	d, err := sql.Open("sqlite", "file:"+path+"?"+q.Encode())
 	if err != nil {
 		return nil, err

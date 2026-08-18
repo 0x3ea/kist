@@ -129,6 +129,26 @@ func (db *DB) FolderPath(folderID int64) ([]Crumb, error) {
 	return chain, nil
 }
 
+// ResolveFolderPath 沿 segments 逐级查找活跃目录,返回末端 id;
+// 空 segments 返回根。任一段缺失即报错(用于 ls/下载前的路径解析)。
+func (db *DB) ResolveFolderPath(segs []string) (int64, error) {
+	cur := rootFolderID
+	for _, seg := range segs {
+		var id int64
+		err := db.QueryRow(
+			`SELECT id FROM folders WHERE parent_id = ? AND name = ? AND deleted_at IS NULL`,
+			cur, seg).Scan(&id)
+		if err == sql.ErrNoRows {
+			return 0, fmt.Errorf("index: 目录不存在: %q", seg)
+		}
+		if err != nil {
+			return 0, err
+		}
+		cur = id
+	}
+	return cur, nil
+}
+
 // SoftDeleteFolders 软删除目录(其下文件经查询侧过滤随之不可见)。
 func (db *DB) SoftDeleteFolders(ids []int64) error {
 	if len(ids) == 0 {

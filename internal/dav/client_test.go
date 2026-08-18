@@ -136,7 +136,7 @@ func TestPutGetRoundTrip(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer f.Close()
-	if err := c.PutFile(ctx, name, f); err != nil {
+	if err := c.PutFile(ctx, name, f, nil); err != nil {
 		t.Fatalf("PutFile: %v", err)
 	}
 
@@ -181,7 +181,7 @@ func TestListDeleteMove(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if err := c.PutFile(ctx, "/kist/"+name, fo); err != nil {
+		if err := c.PutFile(ctx, "/kist/"+name, fo, nil); err != nil {
 			t.Fatalf("PutFile %s: %v", name, err)
 		}
 		fo.Close()
@@ -229,7 +229,7 @@ func TestRetryOn503(t *testing.T) {
 	f.Close()
 	fo, _ := os.Open(f.Name())
 	defer fo.Close()
-	if err := c.PutFile(ctx, "/kist/retry503", fo); err != nil {
+	if err := c.PutFile(ctx, "/kist/retry503", fo, nil); err != nil {
 		t.Fatalf("503 后重试应成功: %v", err)
 	}
 	after, _ := fi.snapshot()
@@ -256,7 +256,7 @@ func TestNoRetryOn4xx(t *testing.T) {
 	f.Close()
 	fo, _ := os.Open(f.Name())
 	defer fo.Close()
-	err = c.PutFile(ctx, "/kist/nope404", fo)
+	err = c.PutFile(ctx, "/kist/nope404", fo, nil)
 	if err == nil {
 		t.Fatal("404 应立即失败")
 	}
@@ -295,7 +295,7 @@ func TestRetryAfterRespected(t *testing.T) {
 	f.Close()
 	fo, _ := os.Open(f.Name())
 	defer fo.Close()
-	if err := c.PutFile(context.Background(), "/kist/ra429", fo); err != nil {
+	if err := c.PutFile(context.Background(), "/kist/ra429", fo, nil); err != nil {
 		t.Fatalf("429 后应重试成功: %v", err)
 	}
 	if len(slept) != 1 || slept[0] < 2*time.Second {
@@ -318,7 +318,7 @@ func TestCtxCanceled(t *testing.T) {
 	f.Close()
 	fo, _ := os.Open(f.Name())
 	defer fo.Close()
-	err = c.PutFile(ctx, "/kist/canceled", fo)
+	err = c.PutFile(ctx, "/kist/canceled", fo, nil)
 	if !errors.Is(err, context.Canceled) {
 		t.Fatalf("期望 context.Canceled,得到 %v", err)
 	}
