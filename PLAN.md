@@ -274,6 +274,18 @@ CleanupOrphans(dryRun bool) (CleanupReport, error)
 
 保留为脚本通道(cron/systemd 定时 `backup`)、救援通道(GUI 故障时的独立数据入口)、无头环境入口。功能定格当前命令集,新功能只进 GUI;随版本附带,编译成本为零。
 
+### 7. 日志系统(建议 Phase 7 之前插入,GUI 调试的前置需求)
+
+当前完全没有日志,存在四处静默黑洞:缩略图生成失败(忽略到无人知晓)、dav 层重试(默默退避重试)、PUT 成功但索引写入失败(孤儿产生无提示)、临时文件清理失败(`_ = e`)。
+
+- **方案**:标准库 `log/slog`(Go 1.21+,零新依赖,契合纯 Go 策略)
+- **落点**:`KIST_HOME/kist.log`(跟随沙盒/正式环境隔离);启动时超过 5MB 轮转为 `.old` 留一代,约 15 行自实现,不引第三方轮转库
+- **分级**:Info(传输起止/备份完成/pull 决策)、Warn(重试、缩略图失败、孤儿产生)、Error(传输失败)
+- **接线**:入口(CLI main、GUI startup)各调一次 `Setup()` → `slog.SetDefault` 全局生效;四处静默点各补 1–2 行
+- **隐私红线**:只记路径名、大小、错误码;永不记口令、密钥、URL 凭据、文件内容(文件名可记:本地明文索引本就含它,日志同在 KIST_HOME)
+- **GUI 联动**:slog handler 可把 Warn/Error 转发为 Wails `notify` 事件,GUI 直接复用
+- **工作量**:约 60–80 行,半小时级
+
 ## Critical Files
 
 - `internal/crypto/blob.go` — 加密格式核心:BlobWriter/BlobReader、AAD、终检
