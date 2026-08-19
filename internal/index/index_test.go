@@ -195,12 +195,12 @@ func TestSearch(t *testing.T) {
 	mustFile(t, db, a, "会议纪要.txt", "季度汇报材料")
 	mustFile(t, db, 1, "100%_done.txt", "")
 
-	// ASCII 大小写不敏感
+	// ASCII 大小写不敏感;根下文件路径应为单斜杠(回归:曾拼出 "//Report.PDF")
 	hits, err := db.Search("pdf", 10)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(hits) != 1 || hits[0].Name != "Report.PDF" {
+	if len(hits) != 1 || hits[0].Name != "Report.PDF" || hits[0].Path != "/Report.PDF" {
 		t.Fatalf("搜索 \"pdf\": %+v", hits)
 	}
 	// 中文关键词 + 完整虚拟路径

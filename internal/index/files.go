@@ -3,6 +3,7 @@ package index
 import (
 	"database/sql"
 	"fmt"
+	"path"
 	"strings"
 )
 
@@ -115,7 +116,8 @@ func (db *DB) Search(q string, limit int) ([]FileHit, error) {
 		if !ok {
 			continue // 祖先目录已软删,视为不可见
 		}
-		h.Path = dir + "/" + h.Name
+		// path.Join 顺带规整拼接:根目录 dir 为 "/" 时不会产生 "//" 前缀
+		h.Path = path.Join(dir, h.Name)
 		hits = append(hits, h)
 	}
 	return hits, rows.Err()
