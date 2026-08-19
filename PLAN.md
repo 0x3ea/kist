@@ -245,7 +245,7 @@ CleanupOrphans(dryRun bool) (CleanupReport, error)
 
 ## 后续计划(v0.1 后的候选增强)
 
-已全部拆分为独立评估文档,见 [`docs/todo/`](docs/todo/)(TODO-01 ~ TODO-10,每篇含评估、设计与验收标准);立项前先在对应文件里更新评估,做完的移出并在进度看板记录。
+已全部拆分为独立评估文档,见 [`docs/todo/`](docs/todo/)(每篇含评估、设计与验收标准);立项前先在对应文件里更新评估,做完的移出并在进度看板记录。
 
 ## Critical Files
 
