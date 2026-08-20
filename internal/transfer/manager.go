@@ -58,6 +58,8 @@ type Deps struct {
 	// PushFailDiscard 报告 outbox push 失败政策:keep(默认/nil)= 挂账留证,
 	// discard = 失败对象删索引行与产物(TODO-13 两档政策)
 	PushFailDiscard func() bool
+	// NoPad 报告是否关闭大小量化(TODO-08):nil/false = 默认 v2 档位填充
+	NoPad func() bool
 }
 
 type job struct {
@@ -298,6 +300,11 @@ func (m *Manager) chunkBytes() uint32 {
 		mib = 4
 	}
 	return uint32(mib) << 20
+}
+
+// noPad 上传加密是否关闭大小量化(默认开,TODO-08)。
+func (m *Manager) noPad() bool {
+	return m.deps.NoPad != nil && m.deps.NoPad()
 }
 
 func (m *Manager) worker(j *job) {

@@ -3,6 +3,7 @@ package crypto
 import (
 	"bytes"
 	"crypto/sha256"
+	"encoding/binary"
 	"errors"
 	"io"
 	"math/rand"
@@ -62,8 +63,14 @@ func (m *memSeeker) Bytes() []byte { return m.b }
 
 func encryptBytes(t *testing.T, mk MasterKey, data []byte, chunk uint32) ([]byte, Meta) {
 	t.Helper()
+	return encryptBytesOpt(t, mk, data, chunk, EncryptOptions{})
+}
+
+func encryptBytesOpt(t *testing.T, mk MasterKey, data []byte, chunk uint32, opt EncryptOptions) ([]byte, Meta) {
+	t.Helper()
+	opt.ChunkSize = chunk
 	ms := &memSeeker{}
-	bw, err := NewBlobWriter(ms, mk, EncryptOptions{ChunkSize: chunk})
+	bw, err := NewBlobWriter(ms, mk, opt)
 	if err != nil {
 		t.Fatalf("NewBlobWriter: %v", err)
 	}
@@ -140,32 +147,100 @@ func TestBlobRoundTrip(t *testing.T) {
 	mk := fixedKey("roundtrip")
 	// 尺寸刻意覆盖:空文件、单字节、块边界±1、整块倍数(防 off-by-one 回归)、多块带余数
 	sizes := []int{0, 1, chunk - 1, chunk, chunk + 1, 2 * chunk, 3*chunk + 123}
-	for _, size := range sizes {
-		data := pseudoBytes(size, byte(size%251))
-		blob, meta := encryptBytes(t, mk, data, chunk)
+	modes := []struct {
+		name string
+		v1   bool // true = 关闭量化(v1),false = 默认量化(v2)
+	}{
+		{"v1-无填充", true},
+		{"v2-量化填充", false},
+	}
+	for _, mode := range modes {
+		for _, size := range sizes {
+			data := pseudoBytes(size, byte(size%251))
+			blob, meta := encryptBytesOpt(t, mk, data, chunk,
+				EncryptOptions{NoPadding: mode.v1})
 
-		n := numChunks(uint64(size), chunk)
-		wantLen := blobHeaderSize + int(n)*tagSize + size
-		if len(blob) != wantLen {
-			t.Fatalf("size=%d: 密文长 %d,期望 %d(n=%d)", size, len(blob), wantLen, n)
+			// 长度公式:v1 = 156+16n+orig;v2 = 156+16n+bucket(orig)
+			plainTotal := uint64(size)
+			wantVersion := uint16(blobVersion2)
+			if mode.v1 {
+				wantVersion = blobVersion1
+			} else {
+				plainTotal = bucketSize(uint64(size))
+			}
+			if v := binary.LittleEndian.Uint16(blob[8:]); v != wantVersion {
+				t.Fatalf("%s size=%d: 版本位 = %d,期望 %d", mode.name, size, v, wantVersion)
+			}
+			n := numChunks(plainTotal, chunk)
+			wantLen := blobHeaderSize + int(n)*tagSize + int(plainTotal)
+			if len(blob) != wantLen {
+				t.Fatalf("%s size=%d: 密文长 %d,期望 %d(n=%d)", mode.name, size, len(blob), wantLen, n)
+			}
+			got, gotMeta, err := decryptBytes(t, mk, blob)
+			if err != nil {
+				t.Fatalf("%s size=%d: 解密: %v", mode.name, size, err)
+			}
+			if !bytes.Equal(got, data) {
+				t.Fatalf("%s size=%d: 明文不一致", mode.name, size)
+			}
+			if gotMeta.OrigSize != uint64(size) || gotMeta.ChunkSize != chunk {
+				t.Fatalf("%s size=%d: meta 尺寸字段不符: %+v", mode.name, size, gotMeta)
+			}
+			sum := sha256.Sum256(data)
+			if gotMeta.PlainSHA != sum {
+				t.Fatalf("%s size=%d: PlainSHA 不符", mode.name, size)
+			}
+			if meta.FileID != gotMeta.FileID {
+				t.Fatalf("%s size=%d: 写读两侧 FileID 不一致", mode.name, size)
+			}
 		}
-		got, gotMeta, err := decryptBytes(t, mk, blob)
-		if err != nil {
-			t.Fatalf("size=%d: 解密: %v", size, err)
+	}
+}
+
+// TestBucketSize 档位函数是格式规范:精确边界与开销上界逐一钉死。
+func TestBucketSize(t *testing.T) {
+	cases := []struct{ orig, want uint64 }{
+		{0, 4 << 10}, // 空文件归最小档,不再可识别(v1 时空文件仅 172B)
+		{1, 4 << 10},
+		{4 << 10, 4 << 10},   // 恰在档位,零填充
+		{4<<10 + 1, 8 << 10}, // 越档进下一档
+		{1<<20 - 1, 1 << 20}, // 小区上界
+		{1 << 20, 1 << 20},   // 1MiB 含在小区(恰整档)
+	}
+	for _, c := range cases {
+		if got := bucketSize(c.orig); got != c.want {
+			t.Fatalf("bucketSize(%d) = %d,期望 %d", c.orig, got, c.want)
 		}
-		if !bytes.Equal(got, data) {
-			t.Fatalf("size=%d: 明文不一致", size)
+	}
+	// 性质:小区开销 ≤4KiB 且恒非零;大区开销 ≤10%
+	for s := uint64(0); s <= 1<<20; s += 1234 {
+		if b := bucketSize(s); b < s || b == 0 || b-s > 4<<10 {
+			t.Fatalf("小区 bucketSize(%d) = %d 越界", s, b)
 		}
-		if gotMeta.OrigSize != uint64(size) || gotMeta.ChunkSize != chunk {
-			t.Fatalf("size=%d: meta 尺寸字段不符: %+v", size, gotMeta)
+	}
+	for _, s := range []uint64{1<<20 + 1, 5<<20 + 123, 100<<20 + 7, 1<<30 + 99, 7 << 30} {
+		if b := bucketSize(s); b < s || b-s > s/10+1 {
+			t.Fatalf("大区 bucketSize(%d) = %d,开销超 10%%", s, b)
 		}
-		sum := sha256.Sum256(data)
-		if gotMeta.PlainSHA != sum {
-			t.Fatalf("size=%d: PlainSHA 不符", size)
-		}
-		if meta.FileID != gotMeta.FileID {
-			t.Fatalf("size=%d: 写读两侧 FileID 不一致", size)
-		}
+	}
+}
+
+// TestBlobV2PaddingIntegrity 补零与真实数据走同一认证路径:
+// 篡改补零区必须被拒绝——填充不是明文区外的裸字节。
+func TestBlobV2PaddingIntegrity(t *testing.T) {
+	const chunk = 1024
+	mk := fixedKey("padtamper")
+	data := pseudoBytes(100, 0x66) // bucket=4KiB,真实数据全在第 1 块,补零跨块
+	blob, _ := encryptBytes(t, mk, data, chunk)
+	bad := bytes.Clone(blob)
+	bad[blobHeaderSize+3*(chunk+tagSize)+500] ^= 0xFF // 纯补零区内
+	if _, _, err := decryptBytes(t, mk, bad); err == nil {
+		t.Fatal("补零区被篡改必须被认证拒绝")
+	}
+
+	// 删掉补零的最后一块 → 长度校验拒绝
+	if _, _, err := decryptBytes(t, mk, blob[:len(blob)-(chunk+tagSize)]); err == nil {
+		t.Fatal("删补零末块必须被长度校验拒绝")
 	}
 }
 
@@ -252,7 +327,9 @@ func TestBlobFinalFlagSpoof(t *testing.T) {
 	const chunk = 1024
 	mk := fixedKey("spoof")
 	data := pseudoBytes(chunk, 0xCD)
-	blob, meta := encryptBytes(t, mk, data, chunk)
+	// 固定 v1(无填充):保证"恰好一块"前提——v2 会把 1KiB 量化到 4KiB(4 块),
+	// 本测试针对的"唯一数据块冒充非末块"场景就不成立了
+	blob, meta := encryptBytesOpt(t, mk, data, chunk, EncryptOptions{NoPadding: true})
 
 	fileKey := DeriveFileKey(mk, meta.FileID)
 	aead, err := newXChaCha(fileKey)

@@ -56,7 +56,7 @@ func (m *Manager) runUpload(j *job) error {
 		return err
 	}
 	chunk := m.chunkBytes()
-	bw, err := crypto.NewBlobWriter(out, mk, crypto.EncryptOptions{ChunkSize: chunk})
+	bw, err := crypto.NewBlobWriter(out, mk, crypto.EncryptOptions{ChunkSize: chunk, NoPadding: m.noPad()})
 	if err != nil {
 		out.Close()
 		return err

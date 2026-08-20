@@ -79,7 +79,8 @@ cmd/kistctl         纯 CLI 入口(GUI 之前先打通核心管线)
 ```
 
 - 密钥派生:`fileKey = HKDF-SHA256(MK, salt=fileID, info="kist/v1/blob")`;`metaKey = HKDF-SHA256(MK, salt="kist/v1", info="kist/v1/meta")`。默认块 4 MiB。
-- 防护:块序号+final 标志进 AAAD(防重排/截断移花接木);期望密文总长 = `156+16n+origSize` 校验(防尾部追加);读毕校验累计大小与流式 SHA-256(防删块);空文件 = 恰好 1 个空末块。
+- 版本(u16le,TODO-08 起):`1` = 无填充(明文区 = origSize);`2` = 大小量化(**默认**,可在设置 `size_padding=off` 关闭)——明文区补零到档位 `bucket(origSize)`(≤1MiB 取整到 4KiB 倍数;>1MiB 按 orig/10 步长取整,开销 ≤10%),交付与 SHA-256 只取前 origSize 字节,补零并入块加密受认证保护;读侧两版兼容。
+- 防护:块序号+final 标志进 AAAD(防重排/截断移花接木);期望密文总长 = `156+16n+明文区总长`(v1=origSize,v2=bucket)校验(防尾部追加);读毕校验累计大小与流式 SHA-256(防删块);v1 空文件 = 恰好 1 个空末块,v2 空文件归 4KiB 档。
 - 明文 SHA、大小、fileID 全在 sealedMeta 内,blob 不泄露任何元数据;单遍流式(临时文件可 seek,header 先占位 Close 时回填)。
 
 ### 导出接口

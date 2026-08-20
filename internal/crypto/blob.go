@@ -15,6 +15,9 @@ import (
 // 索引备份(index.enc)还会填 Mtime/Revision/DeviceID 三个字段。
 type EncryptOptions struct {
 	ChunkSize uint32 // 0 表示使用 DefaultChunkSize
+	// NoPadding 关闭大小量化(写出 v1 格式);零值 false = 默认量化到
+	// 档位(v2,TODO-08)。流量计费网盘可在设置里关(size_padding=off)。
+	NoPadding bool
 	Mtime     uint64
 	Revision  uint64
 	DeviceID  [8]byte
@@ -29,6 +32,7 @@ type BlobWriter struct {
 	aead      cipher.AEAD
 	metaNonce [nonceSize]byte
 	meta      Meta
+	version   uint16 // blobVersion1|2,由 EncryptOptions.NoPadding 决定
 	buf       []byte // 已收满但尚未封出的明文缓冲
 	chunks    uint64 // 已封出的块数
 	sha       hash.Hash
@@ -45,6 +49,11 @@ func NewBlobWriter(w io.WriteSeeker, mk MasterKey, opt EncryptOptions) (*BlobWri
 		w:   w,
 		buf: make([]byte, 0, opt.ChunkSize),
 		sha: sha256.New(),
+	}
+	if opt.NoPadding {
+		bw.version = blobVersion1
+	} else {
+		bw.version = blobVersion2
 	}
 	bw.meta.ChunkSize = opt.ChunkSize
 	bw.meta.Mtime = opt.Mtime
@@ -67,7 +76,7 @@ func NewBlobWriter(w io.WriteSeeker, mk MasterKey, opt EncryptOptions) (*BlobWri
 	}
 	bw.aead = aead
 
-	head := plainHeader(bw.metaNonce)
+	head := plainHeader(bw.metaNonce, bw.version)
 	var zero [metaSealedSize]byte
 	if _, err := w.Write(head[:]); err != nil {
 		return nil, err
@@ -105,10 +114,16 @@ func (bw *BlobWriter) Write(p []byte) (int, error) {
 }
 
 // Close 封出末块(剩余缓冲可能为 0 字节,空文件即此情形),
-// 然后回填加密头 sealedMeta。
+// 然后回填加密头 sealedMeta。v2 先补零到量化档位——补零并入末块
+// (或续出整块)一起加密,块认证顺带保护填充完整性。
 func (bw *BlobWriter) Close() error {
 	if bw.closed {
 		return nil
+	}
+	if bw.version == blobVersion2 {
+		if err := bw.padTo(bucketSize(bw.meta.OrigSize)); err != nil {
+			return err
+		}
 	}
 	if err := bw.sealChunk(true); err != nil {
 		return err
@@ -118,7 +133,7 @@ func (bw *BlobWriter) Close() error {
 	if err != nil {
 		return err
 	}
-	aad := plainHeader(bw.metaNonce)
+	aad := plainHeader(bw.metaNonce, bw.version)
 	em := encodeMeta(bw.meta)
 	sealed := metaAEAD.Seal(nil, bw.metaNonce[:], em[:], aad[:])
 	if _, err := bw.w.Seek(blobPlainHeaderSize, io.SeekStart); err != nil {
@@ -147,22 +162,53 @@ func (bw *BlobWriter) sealChunk(final bool) error {
 	return nil
 }
 
+// padTo 把明文流补零到 target(v2 量化档位)。补零走与真实数据完全相同的
+// 分块/认证路径(可能封出多个整块),但绝不计入 OrigSize 与 SHA——
+// 二者只属于真实明文,读侧据此截断交付。
+// 流位置 = 已封块数×chunkSize + 缓冲长度:非末块恒为整块,该式即明文流
+// 的真实偏移(不能用 OrigSize,它只计真实字节,补零封块后不增长——
+// 测试驱动发现:以 OrigSize 为基准会原地死循环)。
+func (bw *BlobWriter) padTo(target uint64) error {
+	var zeros [64 << 10]byte
+	chunk := uint64(bw.meta.ChunkSize)
+	for {
+		pos := bw.chunks*chunk + uint64(len(bw.buf))
+		if pos >= target {
+			return nil
+		}
+		room := chunk - uint64(len(bw.buf))
+		n := min(min(room, target-pos), uint64(len(zeros)))
+		bw.buf = append(bw.buf, zeros[:n]...)
+		// 与 Write 同规则:缓冲收满且后续还有补零才封为非末块;
+		// 恰好补到档位则留在缓冲,交给 Close 以 final 标志封出
+		if uint64(len(bw.buf)) == chunk && bw.chunks*chunk+chunk < target {
+			if err := bw.sealChunk(false); err != nil {
+				return err
+			}
+		}
+	}
+}
+
 // BlobReader 流式解密器:NewBlobReader 解析并认证头部,Read 逐块解密,
 // EOF 时执行终检(底层无剩余字节 + 明文 SHA-256 与头部声明一致)。
 type BlobReader struct {
-	r        io.Reader
-	aead     cipher.AEAD
-	meta     Meta
-	chunks   uint64 // 已读完的块数
-	nChunks  uint64 // 总块数
-	sha      hash.Hash
-	buf      []byte // 当前块已解密、尚未被读走的部分
-	off      int    // buf 内偏移
-	verified bool
+	r          io.Reader
+	aead       cipher.AEAD
+	meta       Meta
+	padded     bool   // v2:明文区含量化补零,只交付前 OrigSize 字节
+	plainTotal uint64 // 明文区总长(v1=OrigSize;v2=bucketSize(OrigSize))
+	delivered  uint64 // 已交付(参与 SHA)的真实明文字节数
+	chunks     uint64 // 已读完的块数
+	nChunks    uint64 // 总块数
+	sha        hash.Hash
+	buf        []byte // 当前块已解密、尚未被读走的部分
+	off        int    // buf 内偏移
+	verified   bool
 }
 
 // NewBlobReader 解析头部并做长度总校验,任何不符立即失败:
-// 期望密文总长 = 156 + 16*n + origSize,以此拦截截断与尾部追加。
+// 期望密文总长 = 156 + 16*n + 明文区总长(v1=origSize,v2=bucketSize),
+// 以此拦截截断与尾部追加。
 func NewBlobReader(r io.Reader, size int64, mk MasterKey) (*BlobReader, error) {
 	if size < blobHeaderSize {
 		return nil, fmt.Errorf("%w: 文件过小(%d 字节)", ErrCorruptBlob, size)
@@ -174,7 +220,8 @@ func NewBlobReader(r io.Reader, size int64, mk MasterKey) (*BlobReader, error) {
 	if string(head[:8]) != blobMagic {
 		return nil, fmt.Errorf("%w: magic 不符", ErrCorruptBlob)
 	}
-	if v := binary.LittleEndian.Uint16(head[8:]); v != blobVersion {
+	v := binary.LittleEndian.Uint16(head[8:])
+	if v != blobVersion1 && v != blobVersion2 {
 		return nil, fmt.Errorf("%w: 不支持的版本 %d", ErrCorruptBlob, v)
 	}
 	if ml := binary.LittleEndian.Uint32(head[12:]); ml != metaSealedSize {
@@ -200,8 +247,13 @@ func NewBlobReader(r io.Reader, size int64, mk MasterKey) (*BlobReader, error) {
 	if meta.ChunkSize == 0 {
 		return nil, fmt.Errorf("%w: chunkSize 为 0", ErrCorruptBlob)
 	}
-	n := numChunks(meta.OrigSize, meta.ChunkSize)
-	expected := uint64(blobHeaderSize) + n*tagSize + meta.OrigSize
+	padded := v == blobVersion2
+	plainTotal := meta.OrigSize
+	if padded {
+		plainTotal = bucketSize(meta.OrigSize)
+	}
+	n := numChunks(plainTotal, meta.ChunkSize)
+	expected := uint64(blobHeaderSize) + n*tagSize + plainTotal
 	if uint64(size) != expected {
 		return nil, fmt.Errorf("%w: 长度不符(期望 %d,实际 %d),疑似截断或被追加", ErrCorruptBlob, expected, size)
 	}
@@ -211,11 +263,13 @@ func NewBlobReader(r io.Reader, size int64, mk MasterKey) (*BlobReader, error) {
 		return nil, err
 	}
 	return &BlobReader{
-		r:       r,
-		aead:    aead,
-		meta:    meta,
-		nChunks: n,
-		sha:     sha256.New(),
+		r:          r,
+		aead:       aead,
+		meta:       meta,
+		padded:     padded,
+		plainTotal: plainTotal,
+		sha:        sha256.New(),
+		nChunks:    n,
 	}, nil
 }
 
@@ -244,7 +298,7 @@ func (br *BlobReader) readChunk() error {
 	final := i == br.nChunks-1
 	plainLen := uint64(br.meta.ChunkSize)
 	if final {
-		plainLen = br.meta.OrigSize - i*uint64(br.meta.ChunkSize)
+		plainLen = br.plainTotal - i*uint64(br.meta.ChunkSize)
 	}
 	buf := make([]byte, int(plainLen)+tagSize)
 	if _, err := io.ReadFull(br.r, buf); err != nil {
@@ -259,6 +313,14 @@ func (br *BlobReader) readChunk() error {
 		return fmt.Errorf("%w: 第 %d 块认证失败", ErrCorruptBlob, i)
 	}
 	br.chunks = i + 1
+	if br.padded {
+		// v2:交付与 SHA 只覆盖前 OrigSize 字节;跨过边界的块截前段,
+		// 纯补零块认证后整块丢弃(仍须读完整块,末块 tag 不能残留)
+		if keep := br.meta.OrigSize - br.delivered; keep < uint64(len(pt)) {
+			pt = pt[:int(keep)]
+		}
+		br.delivered += uint64(len(pt))
+	}
 	br.sha.Write(pt)
 	br.buf = pt
 	br.off = 0

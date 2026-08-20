@@ -38,6 +38,7 @@ type Settings struct {
 	RememberPassword bool   `json:"remember_password"` // 显式勾选才把 WebDAV 密码落盘
 	AutoBackup       bool   `json:"auto_backup"`       // 索引变更后自动云备份(GUI 阶段生效)
 	OutboxPushFail   string `json:"outbox_push_fail"`  // push 失败政策:keep(默认,挂账)|discard(删行+产物)
+	SizePadding      string `json:"size_padding"`      // 大小量化填充:on(默认,v2 档位)|off(v1,流量敏感网盘可选)
 }
 
 // StoredConfig 是 config.json 的形态;Password 仅在 RememberPassword 时保留。
@@ -61,6 +62,9 @@ func (c *StoredConfig) normalize() {
 	}
 	if c.Settings.OutboxPushFail != "discard" {
 		c.Settings.OutboxPushFail = "keep" // 两档之外的值一律回退 keep(TODO-13)
+	}
+	if c.Settings.SizePadding != "off" {
+		c.Settings.SizePadding = "on" // 默认量化(TODO-08),仅显式 off 才关闭
 	}
 }
 

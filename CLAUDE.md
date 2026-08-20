@@ -34,7 +34,7 @@ go build ./... && go vet ./... && gofmt -l . && go test ./... -race -count=1
 ## 架构速览
 
 ```
-internal/crypto   加密核心(keyfile/blob 流式分块)
+internal/crypto   加密核心(keyfile/blob 流式分块;v2 大小量化填充)
 internal/dav      WebDAV 客户端 + 重试退避(PUT/GET 自管,其余 gowebdav)
 internal/index    SQLite 明文索引(虚拟目录/文件/备注/缩略图/revision)
 internal/remote   远端对象语义(/kist/ 下随机名 blob + keyfile + index.enc)

@@ -66,3 +66,4 @@ v0.1 后的候选增强每项一篇独立评估文档,放在 [`todo/`](todo/),�
 | 13 | 出站箱:`put --defer` 加密+记账先行(files.state=uploading,schema 零迁移),产物落 `KIST_HOME/outbox`;`outbox list/push/verify/discard`;push 失败两档政策(keep 默认/discard 设置);verify 用 O(1) Probe + 大小核对收账(含 02) | 2026-08-20 |
 | 12 | migrate:网盘间纯密文搬运(流式不落盘、整对象断点重试、目标同大小即跳过、keyfile/index.enc 双端哈希校验、`--switch` 验证后切换 config);dav 增 GetBody/PutStream 流式原语 | 2026-08-20 |
 | 11 | 存在性探测 O(1) 化:KeyFileExists 改 PROPFIND Depth 0 精确探测(Exists→Probe 带大小);123pan 万级实测:**PROPFIND 不截断、时延线性 ≈2.2ms/对象、上传限速 ~100 请求/分钟与并发无关、递归 DELETE 带秒级一致性延迟**;结论存 [provider-notes.md](provider-notes.md) | 2026-08-20 |
+| 08 | 大小混淆:blobVersion 2 量化填充(≤1MiB 归 4KiB 档、大文件 10% 阶梯,开销 ≤10%);交付与 SHA 只取真实明文,补零并入块加密受认证保护;读侧兼容 v1;设置 `size_padding` 可关 | 2026-08-20 |

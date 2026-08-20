@@ -404,6 +404,7 @@ func newManager(cfg *config.StoredConfig, store *remote.Store, db *index.DB, mk 
 		MK:          func() (crypto.MasterKey, bool) { return mk, true },
 		Concurrency: func() int { return cfg.Settings.Concurrency },
 		ChunkMiB:    func() int { return cfg.Settings.ChunkMiB },
+		NoPad:       func() bool { return cfg.Settings.SizePadding == "off" },
 		Emit:        emit,
 	})
 }

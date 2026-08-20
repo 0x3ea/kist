@@ -11,8 +11,14 @@ const (
 
 // ---- blob 格式常量 ----
 const (
-	blobMagic   = "KISTBLB1" // 8B
-	blobVersion = 1
+	blobMagic = "KISTBLB1" // 8B
+
+	// blob 格式版本:头部与块布局两版完全一致,版本只决定明文区的长度语义:
+	//   1 = 无填充,明文区长度 = OrigSize(v1 时代与全部既存对象)
+	//   2 = 大小量化填充(TODO-08):明文区长度 = bucketSize(OrigSize),
+	//       交付与 SHA-256 只覆盖前 OrigSize 字节,其后为经过块认证的补零
+	blobVersion1 = 1
+	blobVersion2 = 2
 
 	// DefaultChunkSize 默认分块 4MiB;块大小是上限,末块可以更小
 	DefaultChunkSize uint32 = 4 << 20
@@ -26,6 +32,29 @@ const (
 	noncePrefixSize     = 16                                   // 随机前缀,后接 8B 块序号拼成 nonce
 	fileIDSize          = 16
 )
+
+// 大小量化档位(blobVersion 2 的格式规范,读写两侧必须逐字节一致)。
+// 只用整数运算保证跨平台确定性——此函数一经发布即为格式的一部分,
+// 任何改动都会让既存 v2 对象无法通过长度校验:
+//
+//	orig ≤ 1MiB:向上取整到 4KiB 的倍数(空文件归 4KiB 档,小文件细档)
+//	orig > 1MiB:以 orig/10 为步长向上取整(几何式 10% 阶梯,开销 ≤10%)
+const (
+	bucketSmallZone = 1 << 20
+	bucketSmallStep = 4 << 10
+)
+
+func bucketSize(orig uint64) uint64 {
+	if orig <= bucketSmallZone {
+		b := (orig + bucketSmallStep - 1) / bucketSmallStep * bucketSmallStep
+		if b == 0 {
+			b = bucketSmallStep // 空文件也归最小档,不再可识别(v1 时空文件仅 172B)
+		}
+		return b
+	}
+	step := orig / 10
+	return (orig + step - 1) / step * step
+}
 
 // Meta 是 blob 头部里被加密的元数据;所有字段都不出现在明文区,
 // 网盘侧无法借此获知文件大小、摘要等任何信息(密文总长除外)。
@@ -72,10 +101,10 @@ func decodeMeta(b []byte) (Meta, error) {
 }
 
 // plainHeader 构造 40 字节明文头;writer 写出、reader 解析与头部 AAD 共用同一布局。
-func plainHeader(metaNonce [nonceSize]byte) [blobPlainHeaderSize]byte {
+func plainHeader(metaNonce [nonceSize]byte, version uint16) [blobPlainHeaderSize]byte {
 	var h [blobPlainHeaderSize]byte
 	copy(h[:8], blobMagic)
-	binary.LittleEndian.PutUint16(h[8:], blobVersion)
+	binary.LittleEndian.PutUint16(h[8:], version)
 	binary.LittleEndian.PutUint16(h[10:], 0) // flags 保留
 	binary.LittleEndian.PutUint32(h[12:], metaSealedSize)
 	copy(h[16:], metaNonce[:])
