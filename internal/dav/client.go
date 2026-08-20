@@ -46,6 +46,13 @@ type Client interface {
 	// GetToFile 流式下载到本地文件;prog 以累计字节回调(64KiB 粒度,
 	// 节流由上层负责;重试会从头重传,prog 可能回退后再增长)。
 	GetToFile(ctx context.Context, remotePath, localPath string, prog func(int64)) (int64, error)
+	// GetBody 流式打开 GET 响应体,调用方负责 Close。单次尝试、内部
+	// 不重试——流不可回卷,重传由调用方在整对象粒度重新发起(migrate)。
+	GetBody(ctx context.Context, remotePath string) (io.ReadCloser, error)
+	// PutStream 以显式定长 PUT 一个不可回卷的流(size 取自源端枚举,
+	// 兼容拒绝 chunked 的保守网盘)。同样单次尝试,重试由调用方包装
+	// 整对象(新 GET + 新 PUT)。
+	PutStream(ctx context.Context, remotePath string, size int64, body io.Reader) error
 	// List 列出根目录下的全部对象。
 	List(ctx context.Context) ([]RemoteObject, error)
 	// Probe 精确路径探测:PROPFIND Depth 0 只问该资源本身,不列整目录
@@ -167,6 +174,47 @@ func (c *client) GetToFile(ctx context.Context, remotePath, localPath string, pr
 		return nil
 	})
 	return n, err
+}
+
+// GetBody 打开流式 GET;详见接口注释。
+func (c *client) GetBody(ctx context.Context, remotePath string) (io.ReadCloser, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.url(remotePath), nil)
+	if err != nil {
+		return nil, err
+	}
+	c.auth(req)
+	resp, err := c.hc.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	if resp.StatusCode >= 400 {
+		_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 4<<10))
+		resp.Body.Close()
+		return nil, &StatusError{Op: "GET", Path: remotePath, Code: resp.StatusCode,
+			RetryAfter: parseRetryAfter(resp.Header.Get("Retry-After"))}
+	}
+	return resp.Body, nil
+}
+
+// PutStream 定长 PUT 一个不可回卷的流;详见接口注释。
+func (c *client) PutStream(ctx context.Context, remotePath string, size int64, body io.Reader) error {
+	req, err := http.NewRequestWithContext(ctx, http.MethodPut, c.url(remotePath), body)
+	if err != nil {
+		return err
+	}
+	req.ContentLength = size // 关键:带定长,避免 chunked 编码
+	c.auth(req)
+	resp, err := c.hc.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 4<<10))
+	if resp.StatusCode >= 200 && resp.StatusCode < 300 {
+		return nil
+	}
+	return &StatusError{Op: "PUT", Path: remotePath, Code: resp.StatusCode,
+		RetryAfter: parseRetryAfter(resp.Header.Get("Retry-After"))}
 }
 
 // progressReader 把读取量转成累计字节回调。

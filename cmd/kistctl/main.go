@@ -26,6 +26,7 @@ import (
 	"kist/internal/errs"
 	"kist/internal/index"
 	"kist/internal/logging"
+	"kist/internal/migrate"
 	"kist/internal/remote"
 	"kist/internal/transfer"
 )
@@ -53,6 +54,7 @@ const usageText = `用法:kistctl <子命令> [参数]
   gc      [--dry-run]                    清理 trash blob、报告孤儿
   backup  --pass-stdin                   加密备份索引到远端 index.enc
   pull    --pass-stdin                   从远端恢复索引(新设备/多设备同步)
+  migrate --url <新URL> --user <用户名> [--pass-stdin] [--root /kist] [--switch]  网盘间纯密文迁移(断点续搬,不解锁)
   version                               显示版本`
 
 func main() {
@@ -101,6 +103,8 @@ func run(args []string) error {
 		err = cmdBackup(rest)
 	case "pull":
 		err = cmdPull(rest)
+	case "migrate":
+		err = cmdMigrate(rest)
 	case "version", "-v", "--version":
 		fmt.Printf("kistctl %s (%s)\n", version, commit)
 	default:
@@ -1044,5 +1048,85 @@ func cmdPull(args []string) error {
 		fmt.Printf("本地索引(revision %d)比远端(%d)新,未改动本地;建议先 kistctl backup 推送\n",
 			res.LocalRev, res.RemoteRev)
 	}
+	return nil
+}
+
+// cmdMigrate 网盘间纯密文迁移(TODO-12):不解锁、不触碰明文,可断点续跑。
+func cmdMigrate(args []string) error {
+	fs := flag.NewFlagSet("migrate", flag.ContinueOnError)
+	url := fs.String("url", "", "新网盘 WebDAV 地址(如 https://dav.example.com/dav)")
+	user := fs.String("user", "", "新网盘用户名")
+	root := fs.String("root", "", "新网盘根目录(默认 /kist)")
+	passStdin := fs.Bool("pass-stdin", false, "从 stdin 读一行新网盘的 WebDAV 密码")
+	switchTo := fs.Bool("switch", false, "迁移验证通过后把 config 直接切换到新网盘")
+	conc := fs.Int("concurrency", 2, "搬运并发(1–4)")
+	if err := parseArgs(fs, args); err != nil {
+		return err
+	}
+	if *url == "" || *user == "" {
+		return errs.New(errs.BadConfig, "--url 与 --user 均为必填")
+	}
+	var pass string
+	if *passStdin {
+		pw, err := readPass(true) // 这里的口令是新网盘的 WebDAV 密码
+		if err != nil {
+			return err
+		}
+		pass = pw
+	}
+	dstRoot := *root
+	if dstRoot == "" {
+		dstRoot = "/kist"
+	}
+	_, srcStore, err := loadStore()
+	if err != nil {
+		return err
+	}
+	dstC, err := dav.New(dav.Config{URL: *url, Username: *user, Password: pass, RootPath: dstRoot})
+	if err != nil {
+		return errs.Wrap(errs.BadConfig, err)
+	}
+	res, err := migrate.Run(context.Background(), migrate.Options{
+		Src: srcStore, Dst: dstC, DstRoot: dstRoot, Concurrency: *conc,
+	})
+	if err != nil {
+		return errs.Wrap(errs.DavError, err)
+	}
+	fmt.Printf("迁移完成:复制 %d 个(%.1f MiB),跳过 %d 个(断点已完成),失败 %d 个\n",
+		res.Copied, float64(res.Bytes)/(1<<20), res.Skipped, res.Failed)
+	for _, f := range res.Failures {
+		fmt.Printf("  ✗ %s:%s(重跑 migrate 会自动重试)\n", f.Name, f.Err)
+	}
+	if res.NoIndexBackup {
+		fmt.Println("注意:源端从未 backup(无 index.enc),新端需尽快 backup 一次才能被其他设备 pull")
+	}
+	if res.Failed > 0 {
+		return errs.New(errs.Internal, fmt.Sprintf("%d 个对象迁移失败,keyfile/index.enc 校验未通过,不可 --switch", res.Failed))
+	}
+	fmt.Println("校验通过:keyfile/index.enc 双端哈希一致")
+	if *switchTo {
+		cfg, err := config.Load()
+		if err != nil {
+			return err
+		}
+		cfg.URL = *url
+		cfg.Username = *user
+		cfg.RootPath = dstRoot
+		if pass != "" {
+			cfg.Password = pass
+			cfg.Settings.RememberPassword = true
+		} else {
+			// 旧密码属于旧网盘,不能带去新端
+			cfg.Password = ""
+			cfg.Settings.RememberPassword = false
+		}
+		if err := config.Save(cfg); err != nil {
+			return err
+		}
+		fmt.Printf("已切换到新网盘(%s,%s)。本地 keyfile 与 index.db 无需变动;建议尽快 backup 一次\n",
+			*url, dstRoot)
+		return nil
+	}
+	fmt.Println("未切换:确认无误后可手改 config,或带 --switch 重跑(已完成对象自动跳过,秒级收尾)")
 	return nil
 }

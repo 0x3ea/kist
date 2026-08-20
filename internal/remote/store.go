@@ -2,6 +2,7 @@ package remote
 
 import (
 	"context"
+	"io"
 	"os"
 
 	"kist/internal/dav"
@@ -113,6 +114,18 @@ func (s *Store) ListBlobs(ctx context.Context) ([]string, error) {
 		out = append(out, o.Name)
 	}
 	return out, nil
+}
+
+// ListAll 列出根目录下全部对象,含 keyfile 与 index.enc 两个保留名
+// (migrate 枚举用;ListBlobs 排除保留名,面向 gc)。
+func (s *Store) ListAll(ctx context.Context) ([]dav.RemoteObject, error) {
+	return s.c.List(ctx)
+}
+
+// GetBlobBody 流式打开远端对象的 GET 响应体;调用方负责 Close。
+// 单次尝试不重试,重传由调用方在整对象粒度发起(migrate)。
+func (s *Store) GetBlobBody(ctx context.Context, name string) (io.ReadCloser, error) {
+	return s.c.GetBody(ctx, s.path(name))
 }
 
 // DeleteBlob 删除远端 blob(孤儿清理/trash 落地时调用)。

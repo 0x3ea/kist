@@ -41,6 +41,7 @@ internal/backup   索引云备份与多设备恢复(LWW)
 internal/config   KIST_HOME 路径与 config.json
 internal/errs     AppError 错误码(前端按 Code 映射文案)
 internal/logging  全局日志(slog → KIST_HOME/kist.log,启动轮转留一代)
+internal/migrate  网盘间纯密文迁移(枚举/断点搬运/双端校验)
 入口:cmd/kistctl(CLI)、Wails app.go(Phase 7)
 ```
 
