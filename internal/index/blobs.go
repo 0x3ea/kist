@@ -11,6 +11,15 @@ func (db *DB) RegisterBlob(tx *sql.Tx, name, kind string, size int64) error {
 	return err
 }
 
+// RegisterBlobPending 在事务内登记一个"尚未上传"的对象(TODO-13 defer 路径,
+// 与 InsertFile(state=uploading) 同事务);push/verify 成功后由 MarkUploaded 转 active。
+func (db *DB) RegisterBlobPending(tx *sql.Tx, name, kind string, size int64) error {
+	_, err := tx.Exec(
+		`INSERT OR REPLACE INTO blobs (name, size, kind, state, created_at) VALUES (?,?,?,'pending',?)`,
+		name, size, kind, now())
+	return err
+}
+
 // MarkBlobTrash 把对象标记为待清理;物理删除由孤儿清理流程确认远端状态后执行。
 func (db *DB) MarkBlobTrash(names []string) error {
 	if len(names) == 0 {

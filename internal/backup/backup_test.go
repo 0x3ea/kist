@@ -299,3 +299,39 @@ func TestBackupPullLogs(t *testing.T) {
 		t.Errorf("日志不得包含口令 %q", testPass)
 	}
 }
+
+// TestBackupCarriesUploadingState(TODO-13 验收):uploading 状态随整库备份同步,
+// 另一台设备 pull 后仍看到"待上传"。
+func TestBackupCarriesUploadingState(t *testing.T) {
+	srv, _ := newSrv(t)
+	ctx := context.Background()
+	_, storeA, dbA := setupDevice(t, srv.URL)
+	mk := createAccount(t, storeA)
+	insertFile(t, dbA, "待同步.txt", "", false)
+	hits, err := dbA.Search("待同步", 5)
+	if err != nil || len(hits) != 1 {
+		t.Fatalf("搜索: %+v %v", hits, err)
+	}
+	if err := dbA.SetFileState(hits[0].ID, "uploading"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := BackupNow(ctx, mk, dbA, storeA); err != nil {
+		t.Fatal(err)
+	}
+
+	_, storeB, dbB := setupDevice(t, srv.URL)
+	if _, err := PullRemote(ctx, mk, storeB, dbB); err != nil {
+		t.Fatal(err)
+	}
+	hitsB, err := dbB.Search("待同步", 5)
+	if err != nil || len(hitsB) != 1 {
+		t.Fatalf("B 搜索: %+v %v", hitsB, err)
+	}
+	fB, err := dbB.GetFile(hitsB[0].ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if fB.State != "uploading" {
+		t.Fatalf("pull 后 state = %s,期望 uploading(待上传状态须随库同步)", fB.State)
+	}
+}

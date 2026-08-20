@@ -40,7 +40,14 @@ func (s *Store) Ping(ctx context.Context) error { return s.c.Ping(ctx) }
 // PROPFIND Depth 0 精确探测,代价 O(1):原实现列整个 /kist 再查成员,
 // 处在 init/新设备检测路径上,代价随库规模线性增长(TODO-11)。
 func (s *Store) KeyFileExists(ctx context.Context) (bool, error) {
-	return s.c.Exists(ctx, s.path(KeyFileName))
+	found, _, err := s.c.Probe(ctx, s.path(KeyFileName))
+	return found, err
+}
+
+// ProbeBlob 探测远端 blob 是否存在与服务器报告的大小;size 为 -1 表示
+// 服务器未提供(outbox verify 据此决定是否核对大小)。
+func (s *Store) ProbeBlob(ctx context.Context, name string) (bool, int64, error) {
+	return s.c.Probe(ctx, s.path(name))
 }
 
 // PutKeyFile 上传 keyfile(110 字节小文件,走临时文件以复用定长 PUT)。

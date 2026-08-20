@@ -26,6 +26,7 @@ const (
 	PhaseUploading   = "uploading"
 	PhaseDownloading = "downloading"
 	PhaseDecrypting  = "decrypting"
+	PhaseDeferred    = "deferred" // put --defer 成功:记账完成、产物入出站箱,运输未发生(TODO-13)
 	PhaseDone        = "done"
 	PhaseError       = "error"
 	PhaseCanceled    = "canceled"
@@ -34,7 +35,7 @@ const (
 // Transfer 是一次上传/下载的对外快照(GUI 传输页与 CLI 汇总的数据源)。
 type Transfer struct {
 	ID         string `json:"id"`
-	Kind       string `json:"kind"` // upload | download
+	Kind       string `json:"kind"` // upload | download | push
 	Name       string `json:"name"` // 虚拟文件名
 	UUID       string `json:"uuid"`
 	Phase      string `json:"phase"`
@@ -45,7 +46,8 @@ type Transfer struct {
 	Err        string `json:"err,omitempty"`
 }
 
-// Deps 是管线的全部外部依赖;MK 返回 false 表示未解锁,任务以 LOCKED 失败。
+// Deps 是管线的全部外部依赖;MK 返回 false 表示未解锁,任务以 LOCKED 失败
+// (push 是纯密文搬运,不解密,MK 可恒为 false)。
 type Deps struct {
 	Remote      *remote.Store
 	DB          *index.DB
@@ -53,6 +55,9 @@ type Deps struct {
 	Concurrency func() int // 0 → 2;夹取 1–4,调度器每轮重读(改设置即时生效)
 	ChunkMiB    func() int // 0 → 4
 	Emit        func(event string, payload any)
+	// PushFailDiscard 报告 outbox push 失败政策:keep(默认/nil)= 挂账留证,
+	// discard = 失败对象删索引行与产物(TODO-13 两档政策)
+	PushFailDiscard func() bool
 }
 
 type job struct {
@@ -64,7 +69,8 @@ type job struct {
 	desiredName string
 	folderID    int64
 	mtime       int64
-	// 下载
+	deferred    bool // 上传任务止于"记账+产物入出站箱",不发 PUT(TODO-13)
+	// 下载/push
 	file    index.FileRow
 	destDir string
 }
@@ -113,6 +119,16 @@ func tempRoot() string { return filepath.Join(os.TempDir(), "kist") }
 // 文件夹先在一次事务里建全部子目录(空目录也会保留——可接受的取舍),
 // 再逐文件入队;符号链接一律跳过防环。
 func (m *Manager) UploadPaths(ctx context.Context, paths []string, destFolderID int64) (int, error) {
+	return m.uploadPaths(ctx, paths, destFolderID, false)
+}
+
+// DeferPaths 与 UploadPaths 同构,但止于"加密 + 记账(uploading)+ 产物入
+// 出站箱",不发起 PUT(TODO-13:运输与记账分离,上传交给 push/手工搬运)。
+func (m *Manager) DeferPaths(ctx context.Context, paths []string, destFolderID int64) (int, error) {
+	return m.uploadPaths(ctx, paths, destFolderID, true)
+}
+
+func (m *Manager) uploadPaths(ctx context.Context, paths []string, destFolderID int64, deferred bool) (int, error) {
 	queued := 0
 	for _, p := range paths {
 		st, err := os.Stat(p)
@@ -120,7 +136,7 @@ func (m *Manager) UploadPaths(ctx context.Context, paths []string, destFolderID 
 			return queued, fmt.Errorf("transfer: %s: %w", p, err)
 		}
 		if !st.IsDir() {
-			m.enqueueUpload(ctx, p, st.Name(), destFolderID, st.ModTime().Unix())
+			m.enqueueUpload(ctx, p, st.Name(), destFolderID, st.ModTime().Unix(), deferred)
 			queued++
 			continue
 		}
@@ -191,7 +207,7 @@ func (m *Manager) UploadPaths(ctx context.Context, paths []string, destFolderID 
 			if dir := filepath.Dir(rel); dir != "." {
 				folderID = folderIDs[base+"/"+filepath.ToSlash(dir)]
 			}
-			m.enqueueUpload(ctx, fp, fi.Name(), folderID, fi.ModTime().Unix())
+			m.enqueueUpload(ctx, fp, fi.Name(), folderID, fi.ModTime().Unix(), deferred)
 			queued++
 			return nil
 		})
@@ -219,11 +235,11 @@ func (m *Manager) DownloadTo(ctx context.Context, fileIDs []int64, destDir strin
 	return queued, nil
 }
 
-func (m *Manager) enqueueUpload(ctx context.Context, srcPath, name string, folderID, mtime int64) {
+func (m *Manager) enqueueUpload(ctx context.Context, srcPath, name string, folderID, mtime int64, deferred bool) {
 	jctx, cancel := context.WithCancel(ctx)
 	id := newHexID()
 	j := &job{ctx: jctx, cancel: cancel, srcPath: srcPath, desiredName: name,
-		folderID: folderID, mtime: mtime}
+		folderID: folderID, mtime: mtime, deferred: deferred}
 	j.tr = &Transfer{ID: id, Kind: "upload", Name: name, Phase: PhaseQueued,
 		BytesTotal: 0, StartedAt: time.Now().Unix()}
 	m.add(j)
@@ -287,9 +303,12 @@ func (m *Manager) chunkBytes() uint32 {
 func (m *Manager) worker(j *job) {
 	slog.Info("传输开始", "kind", j.tr.Kind, "name", j.tr.Name)
 	var err error
-	if j.tr.Kind == "upload" {
+	switch j.tr.Kind {
+	case "upload":
 		err = m.runUpload(j)
-	} else {
+	case "push":
+		err = m.runPush(j)
+	default:
 		err = m.runDownload(j)
 	}
 	m.mu.Lock()
@@ -302,7 +321,7 @@ func (m *Manager) worker(j *job) {
 			tr.Phase = PhaseError
 			tr.Err = errs.From(err).Error()
 		}
-	} else {
+	} else if tr.Phase != PhaseDeferred {
 		tr.Phase = PhaseDone
 	}
 	tr.FinishedAt = time.Now().Unix()
@@ -315,6 +334,8 @@ func (m *Manager) worker(j *job) {
 	case PhaseDone:
 		slog.Info("传输完成", "kind", tr.Kind, "name", tr.Name)
 		m.emit("transfer:done", *tr)
+	case PhaseDeferred:
+		slog.Info("已入出站箱待传", "kind", tr.Kind, "name", tr.Name)
 	case PhaseCanceled:
 		slog.Info("传输已取消", "kind", tr.Kind, "name", tr.Name)
 	case PhaseError:

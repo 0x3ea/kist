@@ -36,6 +36,7 @@ type env struct {
 	db    *index.DB
 	m     *transfer.Manager
 	mk    crypto.MasterKey
+	srv   *httptest.Server // 暴露出来供故障注入(如关闭服务模拟断网)
 }
 
 func newEnv(t *testing.T) *env {
@@ -87,7 +88,7 @@ func newEnv(t *testing.T) *env {
 		Concurrency: func() int { return 2 },
 		ChunkMiB:    func() int { return 1 },
 	})
-	return &env{store: store, db: db, m: m, mk: mk}
+	return &env{store: store, db: db, m: m, mk: mk, srv: srv}
 }
 
 func waitIdle(t *testing.T, m *transfer.Manager) []transfer.Transfer {

@@ -28,12 +28,16 @@ func KeyFilePath() string { return filepath.Join(HomeDir(), "keyfile") }
 func IndexPath() string   { return filepath.Join(HomeDir(), "index.db") }
 func BackupDir() string   { return filepath.Join(HomeDir(), "backups") }
 
+// OutboxDir 出站箱(TODO-13):put --defer 留下的加密产物,待 push/手工搬运。
+func OutboxDir() string { return filepath.Join(HomeDir(), "outbox") }
+
 // Settings 是行为偏好;改动并发数对已运行的传输在下一个任务生效(调度器每轮重读)。
 type Settings struct {
-	Concurrency      int  `json:"concurrency"`       // 并发 worker 数,1–4
-	ChunkMiB         int  `json:"chunk_mib"`         // 加密分块大小(MiB),0 = 默认 4
-	RememberPassword bool `json:"remember_password"` // 显式勾选才把 WebDAV 密码落盘
-	AutoBackup       bool `json:"auto_backup"`       // 索引变更后自动云备份(GUI 阶段生效)
+	Concurrency      int    `json:"concurrency"`       // 并发 worker 数,1–4
+	ChunkMiB         int    `json:"chunk_mib"`         // 加密分块大小(MiB),0 = 默认 4
+	RememberPassword bool   `json:"remember_password"` // 显式勾选才把 WebDAV 密码落盘
+	AutoBackup       bool   `json:"auto_backup"`       // 索引变更后自动云备份(GUI 阶段生效)
+	OutboxPushFail   string `json:"outbox_push_fail"`  // push 失败政策:keep(默认,挂账)|discard(删行+产物)
 }
 
 // StoredConfig 是 config.json 的形态;Password 仅在 RememberPassword 时保留。
@@ -54,6 +58,9 @@ func (c *StoredConfig) normalize() {
 	}
 	if c.Settings.ChunkMiB <= 0 {
 		c.Settings.ChunkMiB = 4
+	}
+	if c.Settings.OutboxPushFail != "discard" {
+		c.Settings.OutboxPushFail = "keep" // 两档之外的值一律回退 keep(TODO-13)
 	}
 }
 

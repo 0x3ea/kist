@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"time"
 
+	"kist/internal/config"
 	"kist/internal/crypto"
 	"kist/internal/index"
 )
@@ -113,8 +114,13 @@ func (m *Manager) runUpload(j *job) error {
 		slog.Warn("缩略图生成失败,已忽略", "path", j.srcPath, "err", terr)
 	}
 
+	blobName := newHexID() // 两条路径共用:直接 PUT,或落出站箱待运(TODO-13)
+
+	if j.deferred {
+		return m.deferUpload(j, blobName, cipherSize, encryptedAt, meta, chunk, st, thumb, blobPath)
+	}
+
 	// ---- 阶段三:整文件 PUT(随机名,失败重试在 dav 层)----
-	blobName := newHexID()
 	m.setPhase(tr, PhaseUploading)
 	bf, err := os.Open(blobPath)
 	if err != nil {
@@ -170,5 +176,56 @@ func (m *Manager) runUpload(j *job) error {
 	tr.Name = finalName
 	m.mu.Unlock()
 	m.emit("index:changed", map[string]any{"reason": "upload", "fileID": fileID})
+	return nil
+}
+
+// deferUpload 是 runUpload 的 defer 分支(TODO-13):只"加密 + 记账 + 产物入
+// 出站箱",不发 PUT。索引即写 files.state='uploading'(v1 schema 预留)与
+// blobs.state='pending';产物挪入 KIST_HOME/outbox——运输交给 push 或手工搬运,
+// verify 收账。产物挪动失败时索引行已提交:留着 uploading 行,由 outbox
+// list/verify 报告"产物缺失",用户可 discard 后重来,不会出现幽灵 ready。
+func (m *Manager) deferUpload(j *job, blobName string, cipherSize int64, encryptedAt int64,
+	meta crypto.Meta, chunk uint32, st os.FileInfo, thumb *thumbData, blobPath string) error {
+	tr := j.tr
+	uuid := fmt.Sprintf("%x", meta.FileID[:])
+	shaHex := fmt.Sprintf("%x", meta.PlainSHA[:])
+	finalName := ""
+	var fileID int64
+	err := m.deps.DB.WithTx(func(tx *sql.Tx) error {
+		name, err := m.deps.DB.UniqueFileName(tx, j.folderID, j.desiredName)
+		if err != nil {
+			return err
+		}
+		finalName = name
+		fileID, err = m.deps.DB.InsertFile(tx, index.FileRow{
+			UUID: uuid, FolderID: j.folderID, Name: name,
+			Size: st.Size(), CipherSize: cipherSize,
+			SHA256: shaHex, ChunkSize: int64(chunk), BlobName: blobName,
+			State:       "uploading",
+			ModifiedAt:  j.mtime,
+			EncryptedAt: sql.NullInt64{Int64: encryptedAt, Valid: true},
+		})
+		if err != nil {
+			return err
+		}
+		if thumb != nil {
+			if err := m.deps.DB.PutThumbnail(tx, fileID, thumb.data, thumb.w, thumb.h, thumb.mime); err != nil {
+				return err
+			}
+		}
+		return m.deps.DB.RegisterBlobPending(tx, blobName, "file", cipherSize)
+	})
+	if err != nil {
+		return err
+	}
+	if err := moveArtifact(blobPath, config.OutboxDir(), blobName); err != nil {
+		return err
+	}
+	m.mu.Lock()
+	tr.UUID = uuid
+	tr.Name = finalName
+	m.mu.Unlock()
+	m.setPhase(tr, PhaseDeferred)
+	m.emit("index:changed", map[string]any{"reason": "defer", "fileID": fileID})
 	return nil
 }

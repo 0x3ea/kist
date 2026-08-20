@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"regexp"
 	"strconv"
 	"strings"
 	"time"
@@ -47,10 +48,11 @@ type Client interface {
 	GetToFile(ctx context.Context, remotePath, localPath string, prog func(int64)) (int64, error)
 	// List 列出根目录下的全部对象。
 	List(ctx context.Context) ([]RemoteObject, error)
-	// Exists 精确路径存在性探测:PROPFIND Depth 0 只问该资源本身,
-	// 不列整目录(O(1),不随库规模增长);404 → false,
-	// 网络/权限等其余错误原样返回(TODO-11)。
-	Exists(ctx context.Context, remotePath string) (bool, error)
+	// Probe 精确路径探测:PROPFIND Depth 0 只问该资源本身,不列整目录
+	// (O(1),不随库规模增长);返回是否存在与服务器报告的字节大小
+	// (-1 = 未提供)。404 → (false, 0, nil),网络/权限等其余错误
+	// 原样返回(TODO-11/13)。
+	Probe(ctx context.Context, remotePath string) (bool, int64, error)
 	Delete(ctx context.Context, remotePath string) error
 	Move(ctx context.Context, oldPath, newPath string) error
 }
@@ -222,15 +224,17 @@ func (c *client) List(ctx context.Context) ([]RemoteObject, error) {
 	return out, err
 }
 
-// propfindBody 最小 PROPFIND 请求体:只要 resourcetype,足够判定存在性。
-const propfindBody = `<?xml version="1.0" encoding="utf-8"?><d:propfind xmlns:d="DAV:"><d:prop><d:resourcetype/></d:prop></d:propfind>`
+// propfindBody 最小 PROPFIND 请求体:resourcetype 判存在性,
+// getcontentlength 供 outbox verify 核对大小(TODO-13)。
+const propfindBody = `<?xml version="1.0" encoding="utf-8"?><d:propfind xmlns:d="DAV:"><d:prop><d:resourcetype/><d:getcontentlength/></d:prop></d:propfind>`
 
-// Exists 对精确路径发 PROPFIND Depth 0:只问这一个资源,不触发整目录列举。
-// 服务器普遍返回 207 Multi-Status,少数宽松实现直接 200,均视为存在;
+// Probe 对精确路径发 PROPFIND Depth 0:只问这一个资源,不触发整目录列举。
+// 服务器普遍返回 207 Multi-Status,少数宽松实现直接 200,均视为存在,
+// 并从响应解析 getcontentlength(解析不到返回 -1,verify 侧据此跳过大小核对);
 // 404 视为不存在,其余状态(401/403/5xx…)以 StatusError 上抛——
 // "查无此物"与"查询失败"必须区分,否则新设备检测会把权限问题误判为未初始化。
-func (c *client) Exists(ctx context.Context, remotePath string) (bool, error) {
-	exists := false
+func (c *client) Probe(ctx context.Context, remotePath string) (bool, int64, error) {
+	found, size := false, int64(0)
 	err := c.retry.Do(ctx, func() error {
 		req, err := http.NewRequestWithContext(ctx, "PROPFIND", c.url(remotePath), strings.NewReader(propfindBody))
 		if err != nil {
@@ -244,20 +248,40 @@ func (c *client) Exists(ctx context.Context, remotePath string) (bool, error) {
 			return err
 		}
 		defer resp.Body.Close()
-		_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 4<<10))
+		body, _ := io.ReadAll(io.LimitReader(resp.Body, 64<<10))
 		switch {
 		case resp.StatusCode >= 200 && resp.StatusCode < 300:
-			exists = true
+			found = true
+			if n, ok := parseContentLength(body); ok {
+				size = n
+			} else {
+				size = -1
+			}
 			return nil
 		case resp.StatusCode == http.StatusNotFound:
-			exists = false
+			found, size = false, 0
 			return nil
 		default:
 			return &StatusError{Op: "PROPFIND", Path: remotePath, Code: resp.StatusCode,
 				RetryAfter: parseRetryAfter(resp.Header.Get("Retry-After"))}
 		}
 	})
-	return exists, err
+	return found, size, err
+}
+
+// reContentLength 匹配任意命名空间前缀(d:/D:/无前缀)的 getcontentlength。
+var reContentLength = regexp.MustCompile(`(?i)<[A-Za-z0-9_.-]*:?getcontentlength>\s*(-?\d+)\s*<`)
+
+func parseContentLength(body []byte) (int64, bool) {
+	m := reContentLength.FindSubmatch(body)
+	if m == nil {
+		return 0, false
+	}
+	n, err := strconv.ParseInt(string(m[1]), 10, 64)
+	if err != nil || n < 0 {
+		return 0, false
+	}
+	return n, true
 }
 
 func (c *client) Delete(ctx context.Context, remotePath string) error {

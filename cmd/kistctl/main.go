@@ -42,7 +42,8 @@ const usageText = `用法:kistctl <子命令> [参数]
   config set --url <URL> --user <用户名> [--root /kist] [--pass-stdin]  配置网盘
   init    --pass-stdin                  建账户:主密钥+keyfile+远端初始化
   unlock  --pass-stdin                  校验口令(本地 keyfile 优先,无则拉远端)
-  put     <路径...> [--dest /目录] --pass-stdin   加密上传(文件夹递归)
+  put     <路径...> [--dest /目录] [--defer] --pass-stdin  加密上传(文件夹递归;--defer 只入出站箱不传)
+  outbox  list|push|verify|discard       出站箱:待上传产物的搬运与收账(TODO-13)
   ls      [/路径]                        列虚拟目录
   search  <关键词>                       搜索文件名与备注
   get     <uuid|id> --to <目录> --pass-stdin      下载解密
@@ -80,6 +81,8 @@ func run(args []string) error {
 		err = cmdUnlock(rest)
 	case "put":
 		err = cmdPut(rest)
+	case "outbox":
+		err = cmdOutbox(rest)
 	case "ls":
 		err = cmdLs(rest)
 	case "search":
@@ -401,7 +404,7 @@ func newManager(cfg *config.StoredConfig, store *remote.Store, db *index.DB, mk 
 	})
 }
 
-// waitAndReport 等全部传输结束并汇总;返回失败/取消数。
+// waitAndReport 等全部传输结束并汇总;返回失败/取消数(deferred 不算失败)。
 func waitAndReport(m *transfer.Manager) int {
 	for !m.Idle() {
 		time.Sleep(100 * time.Millisecond)
@@ -411,6 +414,8 @@ func waitAndReport(m *transfer.Manager) int {
 		switch tr.Phase {
 		case transfer.PhaseDone:
 			fmt.Printf("  ✓ %s\n", tr.Name)
+		case transfer.PhaseDeferred:
+			fmt.Printf("  ⏸ 已入出站箱(待上传): %s\n", tr.Name)
 		case transfer.PhaseCanceled:
 			fmt.Printf("  – 已取消 %s\n", tr.Name)
 			fails++
@@ -425,6 +430,7 @@ func waitAndReport(m *transfer.Manager) int {
 func cmdPut(args []string) error {
 	fs := flag.NewFlagSet("put", flag.ContinueOnError)
 	dest := fs.String("dest", "/", "目标虚拟目录(如 /文档/子目录)")
+	deferUpload := fs.Bool("defer", false, "只加密并入出站箱,不立即上传(择机 outbox push 或手工搬运)")
 	passStdin := passStdinFlag(fs)
 	if err := parseArgs(fs, args); err != nil {
 		return err
@@ -466,13 +472,170 @@ func cmdPut(args []string) error {
 		}
 	}
 	m := newManager(cfg, store, db, mk)
-	n, err := m.UploadPaths(context.Background(), paths, folderID)
+	var n int
+	if *deferUpload {
+		n, err = m.DeferPaths(context.Background(), paths, folderID)
+	} else {
+		n, err = m.UploadPaths(context.Background(), paths, folderID)
+	}
 	if err != nil {
 		return err
 	}
 	fmt.Printf("已入队 %d 个文件\n", n)
 	if fails := waitAndReport(m); fails > 0 {
 		return errs.New(errs.Internal, fmt.Sprintf("%d 个传输失败或被取消", fails))
+	}
+	return nil
+}
+
+// ---- 出站箱(TODO-13)----
+
+func cmdOutbox(args []string) error {
+	if len(args) == 0 {
+		return errs.New(errs.BadConfig, "用法:kistctl outbox <list|push|verify|discard> ...")
+	}
+	switch args[0] {
+	case "list":
+		return cmdOutboxList(args[1:])
+	case "push":
+		return cmdOutboxPush(args[1:])
+	case "verify":
+		return cmdOutboxVerify(args[1:])
+	case "discard":
+		return cmdOutboxDiscard(args[1:])
+	default:
+		return errs.New(errs.BadConfig, "未知 outbox 子命令 "+args[0]+"(可用:list|push|verify|discard)")
+	}
+}
+
+func cmdOutboxList(args []string) error {
+	db, err := openIndex()
+	if err != nil {
+		return err
+	}
+	defer db.Close()
+	files, err := db.ListUploading()
+	if err != nil {
+		return errs.From(err)
+	}
+	if len(files) == 0 {
+		fmt.Println("(出站箱为空)")
+		return nil
+	}
+	total := int64(0)
+	for _, f := range files {
+		mark := ""
+		if st, err := os.Stat(transfer.OutboxArtifactPath(f.BlobName)); err != nil {
+			mark = "  [本地产物缺失!]"
+		} else {
+			total += st.Size()
+		}
+		fmt.Printf("%s\t%s\t密文 %d 字节%s\n", f.BlobName, filePathOf(db, f), f.CipherSize, mark)
+	}
+	fmt.Printf("共 %d 个待上传,本地产物占用 %d 字节;手工搬运 = 把产物文件名保持原样上传到远端 %s 后执行 outbox verify\n",
+		len(files), total, cfgRootPath())
+	return nil
+}
+
+func cmdOutboxPush(args []string) error {
+	fs := flag.NewFlagSet("outbox push", flag.ContinueOnError)
+	all := fs.Bool("all", false, "推送全部待上传对象")
+	if err := parseArgs(fs, args); err != nil {
+		return err
+	}
+	cfg, store, err := loadStore()
+	if err != nil {
+		return err
+	}
+	db, err := openIndex()
+	if err != nil {
+		return err
+	}
+	defer db.Close()
+
+	var files []index.FileRow
+	if *all {
+		if files, err = db.ListUploading(); err != nil {
+			return errs.From(err)
+		}
+	} else {
+		if fs.NArg() == 0 {
+			return errs.New(errs.BadConfig, "指定 <blob名>(outbox list 可查)或 --all")
+		}
+		for _, name := range fs.Args() {
+			f, err := db.GetFileByBlobName(name)
+			if err != nil {
+				return errs.From(err)
+			}
+			if f.State != "uploading" {
+				return errs.New(errs.BadConfig, name+" 不是待上传对象(状态 "+f.State+")")
+			}
+			files = append(files, f)
+		}
+	}
+	if len(files) == 0 {
+		fmt.Println("(无待上传对象)")
+		return nil
+	}
+	// push 是纯密文搬运:不解密,MK 恒为未解锁
+	m := transfer.NewManager(transfer.Deps{
+		Remote:          store,
+		DB:              db,
+		MK:              func() (crypto.MasterKey, bool) { return crypto.MasterKey{}, false },
+		Concurrency:     func() int { return cfg.Settings.Concurrency },
+		PushFailDiscard: func() bool { return cfg.Settings.OutboxPushFail == "discard" },
+	})
+	n := m.PushPending(context.Background(), files)
+	fmt.Printf("已入队 %d 个 push\n", n)
+	if fails := waitAndReport(m); fails > 0 {
+		if cfg.Settings.OutboxPushFail == "discard" {
+			return errs.New(errs.Internal,
+				fmt.Sprintf("%d 个 push 失败(discard 档):已回滚,可重新 put --defer 后手工搬运", fails))
+		}
+		return errs.New(errs.Internal,
+			fmt.Sprintf("%d 个 push 失败(keep 档):索引与产物保留——可重试 outbox push、手工搬运后 outbox verify,或 outbox discard 放弃", fails))
+	}
+	return nil
+}
+
+func cmdOutboxVerify(args []string) error {
+	_, store, err := loadStore()
+	if err != nil {
+		return err
+	}
+	db, err := openIndex()
+	if err != nil {
+		return err
+	}
+	defer db.Close()
+	results, err := transfer.RunOutboxVerify(context.Background(), store, db)
+	if err != nil {
+		return errs.From(err)
+	}
+	if len(results) == 0 {
+		fmt.Println("(出站箱为空)")
+		return nil
+	}
+	for _, r := range results {
+		fmt.Printf("%s\t%s\t%s\n", r.Blob, r.Action, r.Detail)
+	}
+	return nil
+}
+
+func cmdOutboxDiscard(args []string) error {
+	if len(args) == 0 {
+		return errs.New(errs.BadConfig, "outbox discard 需要 <blob名>...(outbox list 可查)")
+	}
+	db, err := openIndex()
+	if err != nil {
+		return err
+	}
+	defer db.Close()
+	for _, name := range args {
+		if err := transfer.OutboxDiscard(db, name); err != nil {
+			return errs.From(err)
+		}
+		fmt.Printf("已放弃 %s(索引行与本地产物已删)\n", name)
 	}
 	return nil
 }
@@ -511,7 +674,11 @@ func cmdLs(args []string) error {
 		if e.IsFolder {
 			fmt.Printf("D %s/\n", e.Name)
 		} else {
-			fmt.Printf("F %s\t%d 字节\n", e.Name, e.Size)
+			mark := ""
+			if e.State == "uploading" {
+				mark = "\t待上传"
+			}
+			fmt.Printf("F %s\t%d 字节%s\n", e.Name, e.Size, mark)
 		}
 	}
 	return nil
@@ -595,6 +762,10 @@ func cmdGet(args []string) error {
 	if err != nil {
 		return err
 	}
+	if f.State == "uploading" {
+		return errs.New(errs.Locked,
+			"该文件待上传:先 kistctl outbox push(或手工搬运到远端后 outbox verify)")
+	}
 	destDir, err := filepath.Abs(*to)
 	if err != nil {
 		return err
@@ -643,7 +814,7 @@ func cmdInfo(args []string) error {
 	fmt.Printf("UUID:   %s\n", f.UUID)
 	fmt.Printf("大小:   %d 字节(密文 %d)\n", f.Size, f.CipherSize)
 	fmt.Printf("SHA256: %s\n", f.SHA256)
-	fmt.Printf("状态:   %s\n", f.State)
+	fmt.Printf("状态:   %s\n", stateLabel(f.State))
 	fmt.Printf("加密于: %s\n", unixOrDash(f.EncryptedAt.Int64, f.EncryptedAt.Valid))
 	fmt.Printf("上传于: %s\n", unixOrDash(f.UploadedAt.Int64, f.UploadedAt.Valid))
 	fmt.Printf("备注:   %s\n", orDash(f.Note.String, f.Note.Valid))
@@ -660,6 +831,37 @@ func unixOrDash(v int64, valid bool) string {
 		return "-"
 	}
 	return time.Unix(v, 0).Format("2006-01-02 15:04:05")
+}
+
+// stateLabel 把文件状态映射为可读标签(TODO-13 的 uploading 首次启用该列)。
+func stateLabel(s string) string {
+	switch s {
+	case "uploading":
+		return "待上传"
+	case "ready":
+		return "就绪"
+	case "missing":
+		return "远端缺失"
+	default:
+		return s
+	}
+}
+
+// filePathOf 拼出文件的完整虚拟路径(供 info 与 outbox list 共用)。
+func filePathOf(db *index.DB, f index.FileRow) string {
+	crumb, err := db.FolderPath(f.FolderID)
+	if err != nil {
+		return f.Name
+	}
+	var b strings.Builder
+	for _, c := range crumb {
+		if c.Name == "" {
+			continue
+		}
+		b.WriteString("/")
+		b.WriteString(c.Name)
+	}
+	return b.String() + "/" + f.Name
 }
 
 func orDash(s string, valid bool) string {

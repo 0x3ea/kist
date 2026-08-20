@@ -63,3 +63,4 @@ v0.1 后的候选增强每项一篇独立评估文档,放在 [`todo/`](todo/),�
 | TODO | 内容 | 完成于 |
 |---|---|---|
 | 07 | 日志系统:slog + `KIST_HOME/kist.log` 启动轮转;补四处静默黑洞(缩略图失败 / dav 重试 / 索引写失败致孤儿 / 临时目录清理);Info=传输起止与 pull 决策 | 2026-08-20 |
+| 13 | 出站箱:`put --defer` 加密+记账先行(files.state=uploading,schema 零迁移),产物落 `KIST_HOME/outbox`;`outbox list/push/verify/discard`;push 失败两档政策(keep 默认/discard 设置);verify 用 O(1) Probe + 大小核对收账(含 02) | 2026-08-20 |

@@ -18,6 +18,11 @@ func (m *Manager) runDownload(j *job) error {
 	tr := j.tr
 	f := j.file
 
+	// 待上传对象必然 GET 404,提前给出有指引的拒绝而非网络疑云(TODO-13)
+	if f.State == "uploading" {
+		return errs.New(errs.Locked, "该文件待上传:先 outbox push(或手工搬运后 outbox verify)")
+	}
+
 	mk, ok := m.deps.MK()
 	if !ok {
 		return errsLocked()

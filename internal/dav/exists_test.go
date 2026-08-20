@@ -7,9 +7,9 @@ import (
 	"testing"
 )
 
-// TestExistsExactProbe 存在性探测必须是精确路径 PROPFIND Depth 0,
+// TestProbeExactRequest 探测必须是精确路径 PROPFIND Depth 0 并带回大小,
 // 不得触发整目录列举(TODO-11 验收)。
-func TestExistsExactProbe(t *testing.T) {
+func TestProbeExactRequest(t *testing.T) {
 	srv, fi := newTestServer(t)
 	c := newFastClient(t, srv)
 	ctx := context.Background()
@@ -21,7 +21,7 @@ func TestExistsExactProbe(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer os.Remove(f.Name())
-	if _, err := f.Write([]byte("x")); err != nil {
+	if _, err := f.Write([]byte("xyz")); err != nil { // 3 字节:大小可核
 		t.Fatal(err)
 	}
 	f.Close()
@@ -38,13 +38,16 @@ func TestExistsExactProbe(t *testing.T) {
 	start := len(fi.reqLog)
 	fi.mu.Unlock()
 
-	ok, err := c.Exists(ctx, "/kist/probe0001")
-	if err != nil || !ok {
-		t.Fatalf("存在探测: ok=%v err=%v", ok, err)
+	found, size, err := c.Probe(ctx, "/kist/probe0001")
+	if err != nil || !found {
+		t.Fatalf("存在探测: found=%v err=%v", found, err)
 	}
-	ok, err = c.Exists(ctx, "/kist/absent9999")
-	if err != nil || ok {
-		t.Fatalf("不存在探测: ok=%v err=%v", ok, err)
+	if size != 3 {
+		t.Fatalf("应解析到大小 3,得到 %d", size)
+	}
+	found, size, err = c.Probe(ctx, "/kist/absent9999")
+	if err != nil || found || size != 0 {
+		t.Fatalf("不存在探测: found=%v size=%d err=%v", found, size, err)
 	}
 
 	reqs := fi.requests()[start:]
@@ -61,13 +64,13 @@ func TestExistsExactProbe(t *testing.T) {
 	}
 }
 
-// TestExistsNetworkError 404 与网络错误的行为与原整列实现等价:
+// TestProbeNetworkError 404 与网络错误的行为与原整列实现等价:
 // 断连必须上抛 error,不能误判为"不存在"。
-func TestExistsNetworkError(t *testing.T) {
+func TestProbeNetworkError(t *testing.T) {
 	srv, _ := newTestServer(t)
 	c := newFastClient(t, srv)
 	srv.Close()
-	if _, err := c.Exists(context.Background(), "/kist/x"); err == nil {
+	if _, _, err := c.Probe(context.Background(), "/kist/x"); err == nil {
 		t.Fatal("网络错误应返回 error 而非 false")
 	}
 }
