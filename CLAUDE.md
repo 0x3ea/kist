@@ -29,6 +29,7 @@ go build ./... && go vet ./... && gofmt -l . && go test ./... -race -count=1
 - git 提交信息用中文,写得详细(做了什么/为什么/如何验证);每阶段一提交,提交前更新对应 phase 文档与进度看板
 - 测试先行:边界用例(空文件、块大小整数倍、篡改、截断、中途取消)必须覆盖;测试驱动发现的设计缺陷要在代码注释和 phase 文档里留记录
 - 依赖保持纯 Go、无 CGO(SQLite 用 modernc.org/sqlite,不用系统 keyring)——这是从 Linux 交叉编译 Windows 产物的前提
+- 新增用户可见功能后同步更新 `docs/quickstart.md`(用法示例与「当前边界」),上手文档不落后于 CLI
 
 ## 架构速览
 

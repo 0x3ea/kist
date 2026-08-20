@@ -5,7 +5,8 @@
 把本地文件/文件夹加密后上传到任意 WebDAV 网盘,本地维护明文索引便于查找;下载自动解密。所有加密数据共用一个口令派生的主密钥,网盘上看不到文件名、目录结构与内容。
 
 - **本地数据**(Linux `~/.config/kist`,Windows `%AppData%\kist`):
-  `config.json`(网盘配置)、`keyfile`(主密钥包装)、`index.db`(明文索引)、`backups/`(恢复归档)
+  `config.json`(网盘配置)、`keyfile`(主密钥包装)、`index.db`(明文索引)、
+  `outbox/`(出站箱:待上传的加密产物)、`backups/`(恢复归档)、`kist.log`(运行日志)
 - **网盘上的形态**:根目录 `/kist/` 下只有随机名加密 blob、`keyfile`、`index.enc`,无任何明文信息
 - **⚠️ 口令是唯一凭证**:忘记口令 = 数据不可恢复,没有任何后门。请牢记并保密
 
@@ -61,7 +62,8 @@ export KIST_PASS='我的加密口令'   # 设了它就不用每次 --pass-stdin
 
 kistctl put ~/照片 --dest /2026          # 加密上传文件夹(递归,图片自动生成缩略图)
 kistctl put 报告.pdf --dest /工作
-kistctl ls /2026                          # 列目录
+kistctl put 大视频.mp4 --dest /视频 --defer   # 弱网大文件:只加密+记账不立即上传(见下节)
+kistctl ls /2026                          # 列目录(待上传文件带「待上传」标记)
 kistctl search 照片                        # 搜文件名与备注
 kistctl info 5                            # 查明细:加密/上传时间、SHA、备注、缩略图
 kistctl note 5 --set "海边旅行"            # 写备注(可被搜索)
@@ -69,6 +71,40 @@ kistctl get 5 --to ~/Downloads            # 下载自动解密(校验不过不�
 kistctl rm 5 && kistctl gc                # 删除 → 清理远端 blob
 kistctl backup                            # 把索引加密备份到网盘(重要!定期执行)
 ```
+
+## 弱网 / 大文件:出站箱(put --defer)
+
+很多网盘的 WebDAV 不支持断点续传,大文件上传一旦中断就要整体重传。
+出站箱把「加密+记账」与「上传」拆开——加密产物先落本地,运输择机进行:
+
+```bash
+KIST_PASS='我的加密口令' kistctl put 大视频.mp4 --dest /视频 --defer
+# 产物落在本地 outbox/,索引立即记为「待上传」;此时 get 会提示先完成上传
+
+kistctl outbox list                # 查看待上传对象、对应文件与产物占用
+kistctl outbox push --all          # 方式一:网络好时让 kist 自己重传(免重新加密)
+kistctl outbox verify              # 方式二收账:用网盘官方客户端把 outbox/ 里的
+                                   # 密文文件(保持原文件名)上传到远端 /kist/,
+                                   # 再执行本命令核对大小并标记完成
+kistctl outbox discard <blob名>    # 放弃一笔:删索引记录与本地产物
+```
+
+push 失败默认保留挂账(可重试/手工搬运);想失败即整笔放弃,在
+`config.json` 的 settings 里设 `"outbox_push_fail": "discard"`。
+
+## 换网盘 / 网盘到期(migrate)
+
+迁移是纯密文字节搬运:不解锁、不触碰明文,断点可续(中断重跑只补缺失
+对象),限速网盘下可跨天慢慢搬,也可以放到 VPS 上跑:
+
+```bash
+echo "新网盘密码" | kistctl migrate --url https://新网盘/dav --user 用户名 --pass-stdin
+# 结束时自动校验 keyfile/index.enc 双端一致;确认无误后加 --switch 重跑,
+# 已完成对象自动跳过(秒级收尾),并把 config 切换到新网盘:
+echo "新网盘密码" | kistctl migrate --url https://新网盘/dav --user 用户名 --pass-stdin --switch
+```
+
+本地 `keyfile` 与 `index.db` 无需变动;切换后建议尽快在新端 `backup` 一次。
 
 ## 多设备 / 换电脑
 
@@ -81,9 +117,11 @@ KIST_PASS='我的加密口令' kistctl pull --pass-stdin
 
 pull 会自动拉取 keyfile 并恢复整个索引(含备注与缩略图)。
 **注意 LWW 语义**:同时只在一台设备上写;换设备前先在旧设备 `backup`,新设备先 `pull` 再用。落后一方的本地改动会被归档到 `backups/` 而不是合并。
+其他设备同步到的「待上传」文件不可下载,需原设备完成 push/verify。
 
 ## 出问题时
 
+- 运行日志在 `KIST_HOME/kist.log`:传输起止、WebDAV 重试、孤儿产生、备份与 pull 决策都有记录
 - `kistctl gc --dry-run`:查看 trash 与孤儿 blob,确认后再实删
 - 被替换/覆盖的旧索引都在本地 `backups/` 目录,可手动恢复
 - 口令错了会明确报"口令错误",不会误伤数据
@@ -92,4 +130,5 @@ pull 会自动拉取 keyfile 并恢复整个索引(含备注与缩略图)。
 
 - 无 GUI(Phase 7 开发中);无自动备份(记得手动 `backup`)
 - 视频无缩略图;密文大小会泄露大致明文大小(所有非填充加密方案的共同边界)
-- 大文件上传失败会整体重试,暂无断点续传
+- 无断点续传(当前网盘 WebDAV 不支持 Range):大文件建议 `put --defer` 走出站箱;
+  直接 put 失败会整体重传,且重试不免重新加密
