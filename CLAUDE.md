@@ -40,6 +40,7 @@ internal/transfer 传输管线(并发/进度/取消)+ 缩略图生成 + gc
 internal/backup   索引云备份与多设备恢复(LWW)
 internal/config   KIST_HOME 路径与 config.json
 internal/errs     AppError 错误码(前端按 Code 映射文案)
+internal/logging  全局日志(slog → KIST_HOME/kist.log,启动轮转留一代)
 入口:cmd/kistctl(CLI)、Wails app.go(Phase 7)
 ```
 

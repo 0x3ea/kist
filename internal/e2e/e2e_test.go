@@ -9,9 +9,12 @@ import (
 	"image"
 	"image/color"
 	"image/jpeg"
+	"log/slog"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -405,5 +408,90 @@ func TestE2EWrongMK(t *testing.T) {
 	ents, _ := os.ReadDir(outDir)
 	if len(ents) != 0 {
 		t.Fatalf("失败后不应留 .part 文件: %v", ents)
+	}
+}
+
+// ---- TODO-07 日志验收 ----
+
+// syncBuf 并发安全的日志缓冲(worker goroutine 写、测试断言读,-race 下无告警)。
+type syncBuf struct {
+	mu  sync.Mutex
+	buf bytes.Buffer
+}
+
+func (b *syncBuf) Write(p []byte) (int, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.Write(p)
+}
+
+func (b *syncBuf) String() string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.String()
+}
+
+// captureLog 把全局 slog 重定向到缓冲,测试结束还原。
+func captureLog(t *testing.T) func() string {
+	t.Helper()
+	sb := &syncBuf{}
+	old := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(sb, nil)))
+	t.Cleanup(func() { slog.SetDefault(old) })
+	return sb.String
+}
+
+// TestE2ELogThumbFailure 真图片生成失败记 Warn、传输起止记 Info,
+// 且全流程日志不落口令(TODO-07:分级正确 + 隐私红线)。
+func TestE2ELogThumbFailure(t *testing.T) {
+	e := newEnv(t)
+	read := captureLog(t)
+
+	// 合法 PNG 魔数 + 垃圾字节:嗅探认作 PNG,解码必败 → 走 Warn 分支
+	p := filepath.Join(t.TempDir(), "broken.png")
+	if err := os.WriteFile(p, append([]byte("\x89PNG\r\n\x1a\n"), make([]byte, 256)...), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := e.m.UploadPaths(context.Background(), []string{p}, 1); err != nil {
+		t.Fatal(err)
+	}
+	allDone(t, waitIdle(t, e.m))
+
+	s := read()
+	for _, want := range []string{
+		"level=INFO", "传输开始", "传输完成",
+		"level=WARN", "缩略图生成失败",
+	} {
+		if !strings.Contains(s, want) {
+			t.Errorf("日志应包含 %q:\n%s", want, s)
+		}
+	}
+	if strings.Contains(s, testPass) {
+		t.Errorf("日志不得包含口令 %q", testPass)
+	}
+}
+
+// TestE2ELogOrphanOnIndexFailure PUT 成功而索引写入失败(库已关):
+// blob 成孤儿记 Warn、传输失败记 Error(TODO-07 静默黑洞)。
+func TestE2ELogOrphanOnIndexFailure(t *testing.T) {
+	e := newEnv(t)
+	read := captureLog(t)
+
+	src := makeFile(t, t.TempDir(), "孤儿.bin", 4096)
+	e.db.Close() // 之后索引写入必败而 PUT 照常成功(单文件路径不走 UploadPaths 的建目录事务)
+
+	if _, err := e.m.UploadPaths(context.Background(), []string{src}, 1); err != nil {
+		t.Fatal(err)
+	}
+	trs := waitIdle(t, e.m)
+	if trs[0].Phase != transfer.PhaseError {
+		t.Fatalf("终态 = %s,期望 error", trs[0].Phase)
+	}
+	s := read()
+	if !strings.Contains(s, "level=WARN") || !strings.Contains(s, "孤儿") {
+		t.Errorf("孤儿产生应记 Warn:\n%s", s)
+	}
+	if !strings.Contains(s, "level=ERROR") || !strings.Contains(s, "传输失败") {
+		t.Errorf("传输失败应记 Error:\n%s", s)
 	}
 }

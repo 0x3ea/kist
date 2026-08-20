@@ -1,12 +1,15 @@
 package backup
 
 import (
+	"bytes"
 	"context"
 	"database/sql"
 	"errors"
+	"log/slog"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"kist/internal/config"
@@ -249,5 +252,50 @@ func TestPullCorruptBackup(t *testing.T) {
 	_, storeB, dbB := setupDevice(t, srv.URL)
 	if _, err := PullRemote(ctx, mk, storeB, dbB); err == nil {
 		t.Fatal("损坏的备份必须被拒绝")
+	}
+}
+
+// TestBackupPullLogs 备份完成与 pull 三种决策都记 Info 日志,且不落口令
+// (TODO-07:分级正确 + 隐私红线)。
+func TestBackupPullLogs(t *testing.T) {
+	srv, _ := newSrv(t)
+	ctx := context.Background()
+
+	var buf bytes.Buffer
+	old := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&buf, nil)))
+	t.Cleanup(func() { slog.SetDefault(old) })
+
+	_, storeA, dbA := setupDevice(t, srv.URL)
+	mk := createAccount(t, storeA)
+	insertFile(t, dbA, "a.txt", "", false)
+	if _, err := BackupNow(ctx, mk, dbA, storeA); err != nil {
+		t.Fatal(err)
+	}
+
+	_, storeB, dbB := setupDevice(t, srv.URL)
+	if _, err := PullRemote(ctx, mk, storeB, dbB); err != nil { // replaced
+		t.Fatal(err)
+	}
+	if _, err := PullRemote(ctx, mk, storeB, dbB); err != nil { // noop:同 revision
+		t.Fatal(err)
+	}
+
+	insertFile(t, dbA, "本地改动.txt", "", false)
+	if _, err := PullRemote(ctx, mk, storeA, dbA); err != nil { // local-newer
+		t.Fatal(err)
+	}
+
+	s := buf.String()
+	for _, want := range []string{
+		"level=INFO", "索引备份完成",
+		"本地已恢复", "版本一致", "保留本地",
+	} {
+		if !strings.Contains(s, want) {
+			t.Errorf("日志应包含 %q:\n%s", want, s)
+		}
+	}
+	if strings.Contains(s, testPass) {
+		t.Errorf("日志不得包含口令 %q", testPass)
 	}
 }

@@ -11,6 +11,7 @@ import (
 	"encoding/hex"
 	"fmt"
 	"io"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"time"
@@ -75,6 +76,7 @@ func BackupNow(ctx context.Context, mk crypto.MasterKey, db *index.DB, s *remote
 	if err := db.SetLastBackupAt(time.Now().Unix()); err != nil {
 		return BackupInfo{}, err
 	}
+	slog.Info("索引备份完成", "revision", rev, "size", st.Size())
 	return BackupInfo{Revision: rev, Size: st.Size(), At: time.Now()}, nil
 }
 
@@ -158,9 +160,11 @@ func PullRemote(ctx context.Context, mk crypto.MasterKey, s *remote.Store, db *i
 	switch {
 	case res.RemoteRev < localRev:
 		res.Action = "local-newer"
+		slog.Info("pull 决策:本地更新,保留本地", "local", localRev, "remote", res.RemoteRev)
 		return res, nil
 	case res.RemoteRev == localRev:
 		res.Action = "noop"
+		slog.Info("pull 决策:版本一致,无需恢复", "revision", localRev)
 		return res, nil
 	}
 
@@ -184,6 +188,7 @@ func PullRemote(ctx context.Context, mk crypto.MasterKey, s *remote.Store, db *i
 		return res, err
 	}
 	res.Action = "replaced"
+	slog.Info("pull 决策:远端更新,本地已恢复", "local", localRev, "remote", res.RemoteRev, "device", res.RemoteDevice)
 	return res, nil
 }
 

@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"math/rand"
 	"net"
 	"net/http"
@@ -51,6 +52,9 @@ func (r *Retrier) Do(ctx context.Context, op func() error) error {
 		if ra := retryAfterOf(err); ra > wait {
 			wait = ra
 		}
+		// 重试留痕(TODO-07 静默黑洞):错误串只含方法/路径/状态码,不含凭据
+		slog.Warn("webdav 请求失败,退避后重试", "attempt", attempt+1, "max", maxN,
+			"backoff", wait.String(), "err", err)
 		if err := r.sleep(ctx, wait); err != nil {
 			return err
 		}

@@ -2,6 +2,7 @@ package transfer
 
 import (
 	"bytes"
+	"errors"
 	"fmt"
 	"image"
 	"image/gif"
@@ -22,6 +23,10 @@ const (
 	thumbMaxEdge  = 512
 	thumbMaxBytes = 128 << 10
 )
+
+// errNotImage 标记"嗅探后不是受支持的图片类型":非图片文件属预期而非故障,
+// 上传侧据此静默跳过,只有"是图片但生成失败"才记 Warn 日志(TODO-07)。
+var errNotImage = errors.New("thumb: 非受支持的图片类型")
 
 type thumbData struct {
 	data []byte
@@ -59,7 +64,7 @@ func makeThumbnail(srcPath string) (thumbData, error) {
 	case "image/webp":
 		img, err = webp.Decode(f)
 	default:
-		return t, fmt.Errorf("thumb: 非受支持的图片类型 %q", ct)
+		return t, fmt.Errorf("%w %q", errNotImage, ct)
 	}
 	if err != nil {
 		return t, err

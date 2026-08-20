@@ -2,8 +2,10 @@ package transfer
 
 import (
 	"database/sql"
+	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"time"
@@ -106,6 +108,9 @@ func (m *Manager) runUpload(j *job) error {
 	var thumb *thumbData
 	if td, terr := makeThumbnail(j.srcPath); terr == nil {
 		thumb = &td
+	} else if !errors.Is(terr, errNotImage) {
+		// 是图片却生成失败:留痕供排查(TODO-07 静默黑洞);非图片属预期,静默跳过
+		slog.Warn("缩略图生成失败,已忽略", "path", j.srcPath, "err", terr)
 	}
 
 	// ---- 阶段三:整文件 PUT(随机名,失败重试在 dav 层)----
@@ -155,6 +160,9 @@ func (m *Manager) runUpload(j *job) error {
 		return m.deps.DB.RegisterBlob(tx, blobName, "file", cipherSize)
 	})
 	if err != nil {
+		// PUT 已成功而索引写入失败:远端留下无主 blob 待 gc 处置,必须留痕
+		// (TODO-07 静默黑洞)
+		slog.Warn("索引写入失败,远端 blob 已成孤儿", "blob", blobName, "name", j.desiredName, "err", err)
 		return err
 	}
 	m.mu.Lock()

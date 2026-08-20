@@ -6,6 +6,7 @@ import (
 	"database/sql"
 	"fmt"
 	"io/fs"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"strings"
@@ -96,8 +97,11 @@ func NewManager(d Deps) *Manager {
 		lastEmit: map[string]time.Time{},
 	}
 	m.cond = sync.NewCond(&m.mu)
-	if err := os.RemoveAll(tempRoot()); err == nil {
-		_ = os.MkdirAll(tempRoot(), 0o700)
+	if err := os.RemoveAll(tempRoot()); err != nil {
+		// 上次残留清不掉只占磁盘、不损正确性:留痕不阻断(TODO-07 静默黑洞)
+		slog.Warn("清理上次残留临时目录失败", "dir", tempRoot(), "err", err)
+	} else if err := os.MkdirAll(tempRoot(), 0o700); err != nil {
+		slog.Warn("重建临时目录失败", "dir", tempRoot(), "err", err)
 	}
 	go m.dispatch()
 	return m
@@ -281,6 +285,7 @@ func (m *Manager) chunkBytes() uint32 {
 }
 
 func (m *Manager) worker(j *job) {
+	slog.Info("传输开始", "kind", j.tr.Kind, "name", j.tr.Name)
 	var err error
 	if j.tr.Kind == "upload" {
 		err = m.runUpload(j)
@@ -304,9 +309,16 @@ func (m *Manager) worker(j *job) {
 	m.cond.Broadcast()
 	m.mu.Unlock()
 	m.emitSnapshot(tr)
-	if tr.Phase == PhaseDone {
+	// 传输起止与结果留痕(TODO-07):起止/完成记 Info,失败记 Error;
+	// 取消是用户主动行为,记 Info 即可
+	switch tr.Phase {
+	case PhaseDone:
+		slog.Info("传输完成", "kind", tr.Kind, "name", tr.Name)
 		m.emit("transfer:done", *tr)
-	} else if tr.Phase == PhaseError {
+	case PhaseCanceled:
+		slog.Info("传输已取消", "kind", tr.Kind, "name", tr.Name)
+	case PhaseError:
+		slog.Error("传输失败", "kind", tr.Kind, "name", tr.Name, "err", tr.Err)
 		m.emit("transfer:error", *tr)
 	}
 }

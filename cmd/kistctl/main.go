@@ -25,6 +25,7 @@ import (
 	"kist/internal/dav"
 	"kist/internal/errs"
 	"kist/internal/index"
+	"kist/internal/logging"
 	"kist/internal/remote"
 	"kist/internal/transfer"
 )
@@ -54,6 +55,10 @@ const usageText = `用法:kistctl <子命令> [参数]
   version                               显示版本`
 
 func main() {
+	// 全局日志:落盘 KIST_HOME/kist.log(TODO-07);失败降级为标准错误,不阻断命令
+	if err := logging.Setup(); err != nil {
+		fmt.Fprintln(os.Stderr, "警告:日志初始化失败,降级为标准错误输出:", err)
+	}
 	if err := run(os.Args[1:]); err != nil {
 		fmt.Fprintln(os.Stderr, "错误:", err)
 		os.Exit(1)
