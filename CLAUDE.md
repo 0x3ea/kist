@@ -8,6 +8,7 @@ kist —— WebDAV 加密网盘管理器(Go + Wails v2)。CLI 与 GUI 共享 `in
 - `docs/README.md` — **阶段进度看板**(每完成一阶段更新状态)
 - `docs/phase-*.md` — 各阶段的任务清单/设计说明/验收标准,验收全过才算完成
 - `docs/quickstart.md` — 用户视角的快速上手
+- `docs/provider-notes.md` — **网盘实测特性备忘**(限速/时延/截断/删除语义;批量操作与分桶决策的依据)
 
 ## 常用命令
 
