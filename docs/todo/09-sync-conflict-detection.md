@@ -29,7 +29,7 @@
 
 ## 可选增强
 
-- **启动自动 pull 廉价化**:Range 请求只拉 index.enc 头 156B 读 Meta(需服务器支持 Range;不支持则退化为整拉或 HEAD)
+- **启动自动 pull 廉价化**:Range 请求只拉 index.enc 头 156B 读 Meta(需服务器支持 Range;不支持则退化为整拉或 HEAD——123pan 官方文档已确认不支持 Range,当前网盘上该增强直接走退化路径)
 - **ETag/If-Match**:服务器支持时 push 升级为真 CAS(412 拒绝过期覆盖),不支持自动退化为客户端检测——只做增强,不做依赖
 
 ## 涉及模块
