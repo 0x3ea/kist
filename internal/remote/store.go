@@ -37,17 +37,10 @@ func (s *Store) EnsureReady(ctx context.Context) error { return s.c.EnsureRoot(c
 func (s *Store) Ping(ctx context.Context) error { return s.c.Ping(ctx) }
 
 // KeyFileExists 检查远端是否已初始化(有 keyfile 即视为已建账户)。
+// PROPFIND Depth 0 精确探测,代价 O(1):原实现列整个 /kist 再查成员,
+// 处在 init/新设备检测路径上,代价随库规模线性增长(TODO-11)。
 func (s *Store) KeyFileExists(ctx context.Context) (bool, error) {
-	objs, err := s.c.List(ctx)
-	if err != nil {
-		return false, err
-	}
-	for _, o := range objs {
-		if o.Name == KeyFileName {
-			return true, nil
-		}
-	}
-	return false, nil
+	return s.c.Exists(ctx, s.path(KeyFileName))
 }
 
 // PutKeyFile 上传 keyfile(110 字节小文件,走临时文件以复用定长 PUT)。

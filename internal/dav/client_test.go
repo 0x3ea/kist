@@ -24,12 +24,14 @@ type faultInjector struct {
 	retryAfter     string
 	totalRequests  int
 	putLengths     map[string]int64
+	reqLog         []string // "方法 Depth=深 路径",Exists 探测断言用
 }
 
 func (f *faultInjector) wrap(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		f.mu.Lock()
 		f.totalRequests++
+		f.reqLog = append(f.reqLog, r.Method+" Depth="+r.Header.Get("Depth")+" "+r.URL.Path)
 		if r.Method == http.MethodPut {
 			if f.putLengths == nil {
 				f.putLengths = map[string]int64{}
@@ -65,6 +67,15 @@ func (f *faultInjector) snapshot() (int, map[string]int64) {
 		put[k] = v
 	}
 	return f.totalRequests, put
+}
+
+// requests 返回已记录请求的拷贝("方法 Depth=深 路径")。
+func (f *faultInjector) requests() []string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	out := make([]string, len(f.reqLog))
+	copy(out, f.reqLog)
+	return out
 }
 
 // newTestServer 起一个内存 WebDAV 服务(x/net/webdav + 临时目录)。

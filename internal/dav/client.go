@@ -47,6 +47,10 @@ type Client interface {
 	GetToFile(ctx context.Context, remotePath, localPath string, prog func(int64)) (int64, error)
 	// List 列出根目录下的全部对象。
 	List(ctx context.Context) ([]RemoteObject, error)
+	// Exists 精确路径存在性探测:PROPFIND Depth 0 只问该资源本身,
+	// 不列整目录(O(1),不随库规模增长);404 → false,
+	// 网络/权限等其余错误原样返回(TODO-11)。
+	Exists(ctx context.Context, remotePath string) (bool, error)
 	Delete(ctx context.Context, remotePath string) error
 	Move(ctx context.Context, oldPath, newPath string) error
 }
@@ -216,6 +220,44 @@ func (c *client) List(ctx context.Context) ([]RemoteObject, error) {
 		return nil
 	})
 	return out, err
+}
+
+// propfindBody 最小 PROPFIND 请求体:只要 resourcetype,足够判定存在性。
+const propfindBody = `<?xml version="1.0" encoding="utf-8"?><d:propfind xmlns:d="DAV:"><d:prop><d:resourcetype/></d:prop></d:propfind>`
+
+// Exists 对精确路径发 PROPFIND Depth 0:只问这一个资源,不触发整目录列举。
+// 服务器普遍返回 207 Multi-Status,少数宽松实现直接 200,均视为存在;
+// 404 视为不存在,其余状态(401/403/5xx…)以 StatusError 上抛——
+// "查无此物"与"查询失败"必须区分,否则新设备检测会把权限问题误判为未初始化。
+func (c *client) Exists(ctx context.Context, remotePath string) (bool, error) {
+	exists := false
+	err := c.retry.Do(ctx, func() error {
+		req, err := http.NewRequestWithContext(ctx, "PROPFIND", c.url(remotePath), strings.NewReader(propfindBody))
+		if err != nil {
+			return err
+		}
+		req.Header.Set("Depth", "0")
+		req.Header.Set("Content-Type", "application/xml")
+		c.auth(req)
+		resp, err := c.hc.Do(req)
+		if err != nil {
+			return err
+		}
+		defer resp.Body.Close()
+		_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 4<<10))
+		switch {
+		case resp.StatusCode >= 200 && resp.StatusCode < 300:
+			exists = true
+			return nil
+		case resp.StatusCode == http.StatusNotFound:
+			exists = false
+			return nil
+		default:
+			return &StatusError{Op: "PROPFIND", Path: remotePath, Code: resp.StatusCode,
+				RetryAfter: parseRetryAfter(resp.Header.Get("Retry-After"))}
+		}
+	})
+	return exists, err
 }
 
 func (c *client) Delete(ctx context.Context, remotePath string) error {
