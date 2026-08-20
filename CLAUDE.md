@@ -7,6 +7,7 @@ kist —— WebDAV 加密网盘管理器(Go + Wails v2)。CLI 与 GUI 共享 `in
 - `PLAN.md` — 总体设计(加密格式/schema/管线)+「后续计划」(候选增强的评估都在那)
 - `docs/README.md` — **阶段进度看板**(每完成一阶段更新状态)
 - `docs/phase-*.md` — 各阶段的任务清单/设计说明/验收标准,验收全过才算完成
+- `docs/system-map.md` — **系统现状快照**(模块地图、put/get 字节旅程、不变量清单、失败模式);phase 文档记录"怎么建成的",它回答"现在是什么样"
 - `docs/quickstart.md` — 用户视角的快速上手
 - `docs/provider-notes.md` — **网盘实测特性备忘**(限速/时延/截断/删除语义;批量操作与分桶决策的依据)
 
@@ -29,7 +30,7 @@ go build ./... && go vet ./... && gofmt -l . && go test ./... -race -count=1
 - git 提交信息用中文,写得详细(做了什么/为什么/如何验证);每阶段一提交,提交前更新对应 phase 文档与进度看板
 - 测试先行:边界用例(空文件、块大小整数倍、篡改、截断、中途取消)必须覆盖;测试驱动发现的设计缺陷要在代码注释和 phase 文档里留记录
 - 依赖保持纯 Go、无 CGO(SQLite 用 modernc.org/sqlite,不用系统 keyring)——这是从 Linux 交叉编译 Windows 产物的前提
-- 新增用户可见功能后同步更新 `docs/quickstart.md`(用法示例与「当前边界」),上手文档不落后于 CLI
+- 新增用户可见功能后同步更新 `docs/quickstart.md`(用法示例与「当前边界」),上手文档不落后于 CLI;改动系统行为/结构后同步更新 `docs/system-map.md`,现状图与代码一致(失真的地图比没有更糟)
 
 ## 架构速览
 
