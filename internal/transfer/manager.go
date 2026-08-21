@@ -71,10 +71,13 @@ type job struct {
 	desiredName string
 	folderID    int64
 	mtime       int64
-	deferred    bool // 上传任务止于"记账+产物入出站箱",不发 PUT(TODO-13)
+	deferred    bool  // 上传任务止于"记账+产物入出站箱",不发 PUT(TODO-13)
+	pack        bool  // 目录打包任务(TODO-15):源是目录,zip 流直挂 BlobWriter
+	sizeHint    int64 // pack:源文件总字节(进度预估;准确值以加密结果为准)
 	// 下载/push
 	file    index.FileRow
 	destDir string
+	keepZip bool // pack 下载不解压,落 <名>.zip(TODO-15)
 }
 
 // Manager 是传输管线:动态并发上限的单调度器 + 每任务独立 ctx(可取消)。
@@ -117,20 +120,35 @@ func NewManager(d Deps) *Manager {
 
 func tempRoot() string { return filepath.Join(os.TempDir(), "kist") }
 
-// UploadPaths 展开文件/文件夹并入队,立即返回;返回入队文件数。
-// 文件夹先在一次事务里建全部子目录(空目录也会保留——可接受的取舍),
-// 再逐文件入队;符号链接一律跳过防环。
-func (m *Manager) UploadPaths(ctx context.Context, paths []string, destFolderID int64) (int, error) {
-	return m.uploadPaths(ctx, paths, destFolderID, false)
+// UploadOptions 是上传的可选项(TODO-15)。
+type UploadOptions struct {
+	// Expand 保留逐文件展开的旧行为(每文件一 blob,文件夹镜像为虚拟
+	// 目录);默认按打包粒度解析:put 根为叶子目录时整根一个 pack,
+	// 含子目录时逐叶子成 pack,混杂层散文件按普通文件入库。
+	Expand bool
+}
+
+// UploadPaths 展开文件/文件夹并入队,立即返回;返回入队任务数。
+func (m *Manager) UploadPaths(ctx context.Context, paths []string, destFolderID int64, opts ...UploadOptions) (int, error) {
+	return m.uploadPaths(ctx, paths, destFolderID, false, expandOpt(opts))
 }
 
 // DeferPaths 与 UploadPaths 同构,但止于"加密 + 记账(uploading)+ 产物入
 // 出站箱",不发起 PUT(TODO-13:运输与记账分离,上传交给 push/手工搬运)。
-func (m *Manager) DeferPaths(ctx context.Context, paths []string, destFolderID int64) (int, error) {
-	return m.uploadPaths(ctx, paths, destFolderID, true)
+func (m *Manager) DeferPaths(ctx context.Context, paths []string, destFolderID int64, opts ...UploadOptions) (int, error) {
+	return m.uploadPaths(ctx, paths, destFolderID, true, expandOpt(opts))
 }
 
-func (m *Manager) uploadPaths(ctx context.Context, paths []string, destFolderID int64, deferred bool) (int, error) {
+func expandOpt(opts []UploadOptions) bool {
+	for _, o := range opts {
+		if o.Expand {
+			return true
+		}
+	}
+	return false
+}
+
+func (m *Manager) uploadPaths(ctx context.Context, paths []string, destFolderID int64, deferred, expand bool) (int, error) {
 	queued := 0
 	for _, p := range paths {
 		st, err := os.Stat(p)
@@ -138,92 +156,181 @@ func (m *Manager) uploadPaths(ctx context.Context, paths []string, destFolderID 
 			return queued, fmt.Errorf("transfer: %s: %w", p, err)
 		}
 		if !st.IsDir() {
-			m.enqueueUpload(ctx, p, st.Name(), destFolderID, st.ModTime().Unix(), deferred)
+			m.enqueueUploadSpec(ctx, uploadSpec{src: p, name: st.Name(), folder: destFolderID,
+				mtime: st.ModTime().Unix(), sizeHint: st.Size()}, deferred)
 			queued++
 			continue
 		}
-
-		// 上传文件夹时,文件夹自身的名字构成第一级目录:
-		// put ./资料 --dest /测试 → /测试/资料/...(与直觉一致)
-		base := filepath.Base(p)
-
-		// 第一遍:收集全部子目录(跳过符号链接目录)
-		var dirs [][]string
-		err = filepath.WalkDir(p, func(fp string, d fs.DirEntry, err error) error {
-			if err != nil {
-				return err
-			}
-			if !d.IsDir() {
-				return nil
-			}
-			if d.Type()&fs.ModeSymlink != 0 {
-				return fs.SkipDir
-			}
-			rel, err := filepath.Rel(p, fp)
-			if err != nil || rel == "." {
-				return nil
-			}
-			dirs = append(dirs, append([]string{base}, splitSegments(rel)...))
-			return nil
-		})
-		if err != nil {
-			return queued, fmt.Errorf("transfer: 展开 %s: %w", p, err)
+		var n int
+		if expand {
+			n, err = m.expandFolder(ctx, p, destFolderID, deferred)
+		} else {
+			n, err = m.packFolder(ctx, p, destFolderID, deferred)
 		}
-
-		// 一次性建目录结构;逐级记录 id——文件夹根下的文件需要第一级的 id,
-		// 只记最深一级会让它们拿到零值 folderID 而触发外键失败
-		folderIDs := map[string]int64{}
-		err = m.deps.DB.WithTx(func(tx *sql.Tx) error {
-			for _, segs := range dirs {
-				for i := 1; i <= len(segs); i++ {
-					id, err := m.deps.DB.EnsureFolderPath(tx, destFolderID, segs[:i])
-					if err != nil {
-						return err
-					}
-					folderIDs[joinSegments(segs[:i])] = id
-				}
-			}
-			return nil
-		})
+		queued += n
 		if err != nil {
 			return queued, err
-		}
-
-		// 第二遍:文件入队
-		err = filepath.WalkDir(p, func(fp string, d fs.DirEntry, err error) error {
-			if err != nil {
-				return err
-			}
-			if d.IsDir() || d.Type()&fs.ModeSymlink != 0 {
-				return nil
-			}
-			fi, err := d.Info()
-			if err != nil {
-				return err
-			}
-			rel, err := filepath.Rel(p, fp)
-			if err != nil {
-				return err
-			}
-			folderID := folderIDs[base] // 文件夹根下的文件
-			if dir := filepath.Dir(rel); dir != "." {
-				folderID = folderIDs[base+"/"+filepath.ToSlash(dir)]
-			}
-			m.enqueueUpload(ctx, fp, fi.Name(), folderID, fi.ModTime().Unix(), deferred)
-			queued++
-			return nil
-		})
-		if err != nil {
-			return queued, fmt.Errorf("transfer: 展开 %s: %w", p, err)
 		}
 	}
 	return queued, nil
 }
 
+// expandFolder 是 --expand 的逐文件展开(旧行为):每文件一 blob,文件夹
+// 镜像为虚拟目录;符号链接一律跳过防环(与打包模式的整次拒绝不同)。
+func (m *Manager) expandFolder(ctx context.Context, p string, destFolderID int64, deferred bool) (int, error) {
+	queued := 0
+	// 上传文件夹时,文件夹自身的名字构成第一级目录:
+	// put ./资料 --dest /测试 → /测试/资料/...(与直觉一致)
+	base := filepath.Base(p)
+
+	// 第一遍:收集全部子目录(跳过符号链接目录)
+	var dirs [][]string
+	err := filepath.WalkDir(p, func(fp string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if !d.IsDir() {
+			return nil
+		}
+		if d.Type()&fs.ModeSymlink != 0 {
+			return fs.SkipDir
+		}
+		rel, err := filepath.Rel(p, fp)
+		if err != nil || rel == "." {
+			return nil
+		}
+		dirs = append(dirs, append([]string{base}, splitSegments(rel)...))
+		return nil
+	})
+	if err != nil {
+		return queued, fmt.Errorf("transfer: 展开 %s: %w", p, err)
+	}
+
+	// 一次性建目录结构;逐级记录 id——文件夹根下的文件需要第一级的 id,
+	// 只记最深一级会让它们拿到零值 folderID 而触发外键失败
+	folderIDs := map[string]int64{}
+	err = m.deps.DB.WithTx(func(tx *sql.Tx) error {
+		for _, segs := range dirs {
+			for i := 1; i <= len(segs); i++ {
+				id, err := m.deps.DB.EnsureFolderPath(tx, destFolderID, segs[:i])
+				if err != nil {
+					return err
+				}
+				folderIDs[joinSegments(segs[:i])] = id
+			}
+		}
+		return nil
+	})
+	if err != nil {
+		return queued, err
+	}
+
+	// 第二遍:文件入队
+	err = filepath.WalkDir(p, func(fp string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if d.IsDir() || d.Type()&fs.ModeSymlink != 0 {
+			return nil
+		}
+		fi, err := d.Info()
+		if err != nil {
+			return err
+		}
+		rel, err := filepath.Rel(p, fp)
+		if err != nil {
+			return err
+		}
+		folderID := folderIDs[base] // 文件夹根下的文件
+		if dir := filepath.Dir(rel); dir != "." {
+			folderID = folderIDs[base+"/"+filepath.ToSlash(dir)]
+		}
+		m.enqueueUploadSpec(ctx, uploadSpec{src: fp, name: fi.Name(), folder: folderID,
+			mtime: fi.ModTime().Unix(), sizeHint: fi.Size()}, deferred)
+		queued++
+		return nil
+	})
+	if err != nil {
+		return queued, fmt.Errorf("transfer: 展开 %s: %w", p, err)
+	}
+	return queued, nil
+}
+
+// packFolder 按 TODO-15 打包粒度上传文件夹:先校验(非 UTF-8 名、symlink/
+// 特殊文件使整次 put 拒绝),再规划叶子 pack/散文件/虚拟目录,一次事务
+// 建目录后逐任务入队。返回入队数。
+func (m *Manager) packFolder(ctx context.Context, p string, destFolderID int64, deferred bool) (int, error) {
+	plan, err := planPackTree(p)
+	if err != nil {
+		return 0, err
+	}
+	base := filepath.Base(p)
+	folderIDs := map[string]int64{}
+	err = m.deps.DB.WithTx(func(tx *sql.Tx) error {
+		if !plan.RootIsPack {
+			// 根名构成第一级目录(整根成 pack 时不需要)
+			id, err := m.deps.DB.EnsureFolderPath(tx, destFolderID, []string{base})
+			if err != nil {
+				return err
+			}
+			folderIDs[base] = id
+		}
+		for _, segs := range plan.VirtualDirs {
+			full := append([]string{base}, segs...)
+			id, err := m.deps.DB.EnsureFolderPath(tx, destFolderID, full)
+			if err != nil {
+				return err
+			}
+			folderIDs[joinSegments(full)] = id
+		}
+		return nil
+	})
+	if err != nil {
+		return 0, err
+	}
+	folderOf := func(parent []string) int64 {
+		if len(parent) == 0 {
+			return folderIDs[base]
+		}
+		return folderIDs[joinSegments(append([]string{base}, parent...))]
+	}
+	queued := 0
+	if rp := plan.RootPack; rp != nil {
+		m.enqueueUploadSpec(ctx, uploadSpec{src: rp.AbsDir, name: rp.Name, folder: destFolderID,
+			mtime: rp.Mtime, pack: true, sizeHint: rp.Bytes}, deferred)
+		queued++
+	}
+	for _, pr := range plan.Packs {
+		m.enqueueUploadSpec(ctx, uploadSpec{src: pr.AbsDir, name: pr.Name,
+			folder: folderOf(parentSegs(pr.RelSegs)), mtime: pr.Mtime, pack: true, sizeHint: pr.Bytes}, deferred)
+		queued++
+	}
+	for _, lf := range plan.Loose {
+		m.enqueueUploadSpec(ctx, uploadSpec{src: lf.AbsPath, name: lf.Name,
+			folder: folderOf(parentSegs(lf.RelSegs)), mtime: lf.Mtime, sizeHint: lf.Bytes}, deferred)
+		queued++
+	}
+	return queued, nil
+}
+
+// DownloadOptions 是下载的可选项(TODO-15)。
+type DownloadOptions struct {
+	// KeepZip:pack 条目不解压还原成文件夹,直接落 <名>.zip
+	// (喂漫画阅读器可自行改名 .cbz)。
+	KeepZip bool
+}
+
 // DownloadTo 把索引中的文件下载解密到 destDir(不存在则创建);返回入队数。
-func (m *Manager) DownloadTo(ctx context.Context, fileIDs []int64, destDir string) (int, error) {
+// pack 条目默认解压还原成文件夹(临时目录整体 rename 保原子落盘)。
+func (m *Manager) DownloadTo(ctx context.Context, fileIDs []int64, destDir string, opts ...DownloadOptions) (int, error) {
 	if err := os.MkdirAll(destDir, 0o755); err != nil {
 		return 0, err
+	}
+	keepZip := false
+	for _, o := range opts {
+		if o.KeepZip {
+			keepZip = true
+		}
 	}
 	queued := 0
 	for _, fid := range fileIDs {
@@ -231,26 +338,37 @@ func (m *Manager) DownloadTo(ctx context.Context, fileIDs []int64, destDir strin
 		if err != nil {
 			return queued, errs.From(err)
 		}
-		m.enqueueDownload(ctx, f, destDir)
+		m.enqueueDownload(ctx, f, destDir, keepZip)
 		queued++
 	}
 	return queued, nil
 }
 
-func (m *Manager) enqueueUpload(ctx context.Context, srcPath, name string, folderID, mtime int64, deferred bool) {
+// uploadSpec 是一次上传任务的入队描述(普通文件与 pack 共用)。
+type uploadSpec struct {
+	src      string
+	name     string
+	folder   int64
+	mtime    int64
+	pack     bool
+	sizeHint int64
+}
+
+func (m *Manager) enqueueUploadSpec(ctx context.Context, s uploadSpec, deferred bool) {
 	jctx, cancel := context.WithCancel(ctx)
 	id := newHexID()
-	j := &job{ctx: jctx, cancel: cancel, srcPath: srcPath, desiredName: name,
-		folderID: folderID, mtime: mtime, deferred: deferred}
-	j.tr = &Transfer{ID: id, Kind: "upload", Name: name, Phase: PhaseQueued,
+	j := &job{ctx: jctx, cancel: cancel, srcPath: s.src, desiredName: s.name,
+		folderID: s.folder, mtime: s.mtime, deferred: deferred,
+		pack: s.pack, sizeHint: s.sizeHint}
+	j.tr = &Transfer{ID: id, Kind: "upload", Name: s.name, Phase: PhaseQueued,
 		BytesTotal: 0, StartedAt: time.Now().Unix()}
 	m.add(j)
 }
 
-func (m *Manager) enqueueDownload(ctx context.Context, f index.FileRow, destDir string) {
+func (m *Manager) enqueueDownload(ctx context.Context, f index.FileRow, destDir string, keepZip bool) {
 	jctx, cancel := context.WithCancel(ctx)
 	id := newHexID()
-	j := &job{ctx: jctx, cancel: cancel, file: f, destDir: destDir}
+	j := &job{ctx: jctx, cancel: cancel, file: f, destDir: destDir, keepZip: keepZip}
 	j.tr = &Transfer{ID: id, Kind: "download", Name: f.Name, UUID: f.UUID, Phase: PhaseQueued,
 		BytesTotal: f.Size + f.CipherSize, StartedAt: time.Now().Unix()}
 	m.add(j)

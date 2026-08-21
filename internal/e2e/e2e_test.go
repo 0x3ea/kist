@@ -172,8 +172,9 @@ func mustFolder(t *testing.T, db *index.DB, segs ...string) int64 {
 	return id
 }
 
-// TestE2ELifecycle 完整生命周期:上传(文件夹递归/中文/空文件/多块/图片缩略图)
-// → 远端形态 → 下载比对 → 信息查询。
+// TestE2ELifecycle 完整生命周期(--expand 逐文件路径):上传(文件夹递归/
+// 中文/空文件/多块/图片缩略图)→ 远端形态 → 下载比对 → 信息查询。
+// put 文件夹的默认打包语义(TODO-15)由 TestE2EFolderPack 单独覆盖。
 func TestE2ELifecycle(t *testing.T) {
 	e := newEnv(t)
 	ctx := context.Background()
@@ -184,7 +185,7 @@ func TestE2ELifecycle(t *testing.T) {
 	makeJPEG(t, src, "资料/照片.jpg", 700, 500)   // >512 → 触发缩放
 
 	dest := mustFolder(t, e.db, "测试")
-	n, err := e.m.UploadPaths(ctx, []string{filepath.Join(src, "资料")}, dest)
+	n, err := e.m.UploadPaths(ctx, []string{filepath.Join(src, "资料")}, dest, transfer.UploadOptions{Expand: true})
 	if err != nil || n != 4 {
 		t.Fatalf("入队 %d 个(期望 4): %v", n, err)
 	}

@@ -43,11 +43,11 @@ const usageText = `用法:kistctl <子命令> [参数]
   config set --url <URL> --user <用户名> [--root /kist] [--pass-stdin]  配置网盘
   init    --pass-stdin                  建账户:主密钥+keyfile+远端初始化
   unlock  --pass-stdin                  校验口令(本地 keyfile 优先,无则拉远端)
-  put     <路径...> [--dest /目录] [--defer] --pass-stdin  加密上传(文件夹递归;--defer 只入出站箱不传)
+  put     <路径...> [--dest /目录] [--defer] [--expand] --pass-stdin  加密上传(文件夹默认按叶子目录打包,一话一对象;--expand 逐文件;--defer 只入出站箱)
   outbox  list|push|verify|discard       出站箱:待上传产物的搬运与收账(TODO-13)
   ls      [/路径]                        列虚拟目录
   search  <关键词>                       搜索文件名与备注
-  get     <uuid|id> --to <目录> --pass-stdin      下载解密
+  get     <uuid|id> --to <目录> [--keep-zip] --pass-stdin  下载解密(文件夹条目还原成目录;--keep-zip 落 zip)
   info    <uuid|id>                      查看明细(时间/备注/缩略图)
   note    <id> [--set 文本]              查看/设置备注
   rm      <id...>                        软删除文件
@@ -436,6 +436,7 @@ func cmdPut(args []string) error {
 	fs := flag.NewFlagSet("put", flag.ContinueOnError)
 	dest := fs.String("dest", "/", "目标虚拟目录(如 /文档/子目录)")
 	deferUpload := fs.Bool("defer", false, "只加密并入出站箱,不立即上传(择机 outbox push 或手工搬运)")
+	expand := fs.Bool("expand", false, "逐文件展开(旧行为:每文件一个加密对象;默认文件夹按叶子目录打包)")
 	passStdin := passStdinFlag(fs)
 	if err := parseArgs(fs, args); err != nil {
 		return err
@@ -477,11 +478,15 @@ func cmdPut(args []string) error {
 		}
 	}
 	m := newManager(cfg, store, db, mk)
+	var opts []transfer.UploadOptions
+	if *expand {
+		opts = append(opts, transfer.UploadOptions{Expand: true})
+	}
 	var n int
 	if *deferUpload {
-		n, err = m.DeferPaths(context.Background(), paths, folderID)
+		n, err = m.DeferPaths(context.Background(), paths, folderID, opts...)
 	} else {
-		n, err = m.UploadPaths(context.Background(), paths, folderID)
+		n, err = m.UploadPaths(context.Background(), paths, folderID, opts...)
 	}
 	if err != nil {
 		return err
@@ -678,13 +683,17 @@ func cmdLs(args []string) error {
 	for _, e := range entries {
 		if e.IsFolder {
 			fmt.Printf("D %s/\n", e.Name)
-		} else {
-			mark := ""
-			if e.State == "uploading" {
-				mark = "\t待上传"
-			}
-			fmt.Printf("F %s\t%d 字节%s\n", e.Name, e.Size, mark)
+			continue
 		}
+		mark := ""
+		if e.State == "uploading" {
+			mark = "\t待上传"
+		}
+		if e.Pack {
+			fmt.Printf("P %s/\t%d 字节%s\n", e.Name, e.Size, mark)
+			continue
+		}
+		fmt.Printf("F %s\t%d 字节%s\n", e.Name, e.Size, mark)
 	}
 	return nil
 }
@@ -739,6 +748,7 @@ func resolveTarget(db *index.DB, target string) (index.FileRow, error) {
 func cmdGet(args []string) error {
 	fs := flag.NewFlagSet("get", flag.ContinueOnError)
 	to := fs.String("to", ".", "下载目标目录")
+	keepZip := fs.Bool("keep-zip", false, "文件夹条目不解压,直接落 <名>.zip(喂漫画阅读器可改名 .cbz)")
 	passStdin := passStdinFlag(fs)
 	if err := parseArgs(fs, args); err != nil {
 		return err
@@ -776,7 +786,11 @@ func cmdGet(args []string) error {
 		return err
 	}
 	m := newManager(cfg, store, db, mk)
-	if _, err := m.DownloadTo(context.Background(), []int64{f.ID}, destDir); err != nil {
+	var dOpts []transfer.DownloadOptions
+	if *keepZip {
+		dOpts = append(dOpts, transfer.DownloadOptions{KeepZip: true})
+	}
+	if _, err := m.DownloadTo(context.Background(), []int64{f.ID}, destDir, dOpts...); err != nil {
 		return err
 	}
 	fmt.Printf("下载到 %s\n", destDir)

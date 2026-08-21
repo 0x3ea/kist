@@ -25,11 +25,12 @@ type FileRow struct {
 	UploadedAt  sql.NullInt64
 	Note        sql.NullString
 	UserMeta    sql.NullString
+	Pack        bool // 目录打包条目(TODO-15):明文区是 zip,get 还原成文件夹
 	DeletedAt   sql.NullInt64
 }
 
 const fileColumns = `id, uuid, folder_id, name, size, cipher_size, sha256, chunk_size,
-	blob_name, state, created_at, modified_at, encrypted_at, uploaded_at, note, user_meta, deleted_at`
+	blob_name, state, created_at, modified_at, encrypted_at, uploaded_at, note, user_meta, pack, deleted_at`
 
 // FileHit 是搜索结果:Name 命中文件名或 Note 命中备注,Path 为完整虚拟路径。
 type FileHit struct {
@@ -47,7 +48,7 @@ func scanFile(row rowScanner) (FileRow, error) {
 	var f FileRow
 	err := row.Scan(&f.ID, &f.UUID, &f.FolderID, &f.Name, &f.Size, &f.CipherSize, &f.SHA256,
 		&f.ChunkSize, &f.BlobName, &f.State, &f.CreatedAt, &f.ModifiedAt,
-		&f.EncryptedAt, &f.UploadedAt, &f.Note, &f.UserMeta, &f.DeletedAt)
+		&f.EncryptedAt, &f.UploadedAt, &f.Note, &f.UserMeta, &f.Pack, &f.DeletedAt)
 	return f, err
 }
 
@@ -62,10 +63,10 @@ func (db *DB) InsertFile(tx *sql.Tx, f FileRow) (int64, error) {
 	}
 	res, err := tx.Exec(`INSERT INTO files
 		(uuid, folder_id, name, size, cipher_size, sha256, chunk_size, blob_name,
-		 state, created_at, modified_at, encrypted_at, uploaded_at, note, user_meta)
-		VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+		 state, created_at, modified_at, encrypted_at, uploaded_at, note, user_meta, pack)
+		VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
 		f.UUID, f.FolderID, f.Name, f.Size, f.CipherSize, f.SHA256, f.ChunkSize, f.BlobName,
-		f.State, f.CreatedAt, f.ModifiedAt, f.EncryptedAt, f.UploadedAt, f.Note, f.UserMeta)
+		f.State, f.CreatedAt, f.ModifiedAt, f.EncryptedAt, f.UploadedAt, f.Note, f.UserMeta, f.Pack)
 	if err != nil {
 		return 0, err
 	}

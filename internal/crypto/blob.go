@@ -150,6 +150,16 @@ func (bw *BlobWriter) Close() error {
 // 供上层写入索引。
 func (bw *BlobWriter) Meta() Meta { return bw.meta }
 
+// PlainTotal 返回明文区总长(v1 = OrigSize;v2 = 量化档位 bucketSize)。
+// 供索引把 pack 条目的 size 记成与密文长度对账自洽的显示值(TODO-15);
+// 须在 Close 之后调用。交付与 SHA 仍以 OrigSize 为准,补零不属于真实明文。
+func (bw *BlobWriter) PlainTotal() uint64 {
+	if bw.version == blobVersion2 {
+		return bucketSize(bw.meta.OrigSize)
+	}
+	return bw.meta.OrigSize
+}
+
 func (bw *BlobWriter) sealChunk(final bool) error {
 	nonce := chunkNonce(bw.meta.NoncePrefix, bw.chunks)
 	aad := chunkAAD(bw.meta.FileID, bw.chunks, final)

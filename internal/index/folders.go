@@ -13,6 +13,7 @@ type Entry struct {
 	Size       int64  // 目录为 0
 	ModifiedAt int64  // 目录为 0
 	State      string // 文件:uploading|ready|missing(TODO-13,ls 标记用);目录为空
+	Pack       bool   // 文件:目录打包条目(TODO-15),ls 以 P 标记
 }
 
 // Crumb 是面包屑的一段。
@@ -87,7 +88,7 @@ func (db *DB) ListFolder(folderID int64) ([]Entry, error) {
 	rows.Close()
 
 	rows, err = db.Query(
-		`SELECT id, name, size, modified_at, state FROM files
+		`SELECT id, name, size, modified_at, state, pack FROM files
 		 WHERE folder_id = ? AND deleted_at IS NULL ORDER BY name`,
 		folderID)
 	if err != nil {
@@ -96,7 +97,7 @@ func (db *DB) ListFolder(folderID int64) ([]Entry, error) {
 	defer rows.Close()
 	for rows.Next() {
 		var e Entry
-		if err := rows.Scan(&e.ID, &e.Name, &e.Size, &e.ModifiedAt, &e.State); err != nil {
+		if err := rows.Scan(&e.ID, &e.Name, &e.Size, &e.ModifiedAt, &e.State, &e.Pack); err != nil {
 			return nil, err
 		}
 		out = append(out, e)

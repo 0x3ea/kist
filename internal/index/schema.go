@@ -2,7 +2,12 @@ package index
 
 // migrations 按版本顺序排列,由 db.migrate() 按 PRAGMA user_version 逐个应用。
 // 结构变更时只允许追加新脚本,不得修改历史脚本(老库要靠它们升级)。
-var migrations = []string{v1Schema}
+var migrations = []string{v1Schema, v2AddPack}
+
+// v2(TODO-15):files.pack 标记"目录打包条目"——明文区是一个 zip,
+// get 侧解压还原成文件夹。size 记量化后的明文区总长(显示值,
+// 真实 origSize 以 sealedMeta 为准,不得用索引 size 推明文长度)。
+const v2AddPack = `ALTER TABLE files ADD COLUMN pack INTEGER NOT NULL DEFAULT 0;`
 
 const v1Schema = `
 CREATE TABLE IF NOT EXISTS folders (

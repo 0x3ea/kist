@@ -107,7 +107,37 @@ func (m *Manager) runDownload(j *job) error {
 		return err
 	}
 
-	// ---- 阶段三:原子落盘 ----
+	// ---- 阶段三:落盘 ----
+	// pack 条目(TODO-15):解密产物是 zip。默认解压到临时目录后整体
+	// rename 还原成文件夹(同文件系统目录 rename 原子,接上单文件的
+	// 原子落盘语义);--keep-zip 则改名 .zip 直接交付。
+	if f.Pack {
+		if j.keepZip {
+			zipFinal := uniqueLocalName(j.destDir, f.Name+".zip")
+			if err := os.Rename(partPath, filepath.Join(j.destDir, zipFinal)); err != nil {
+				return err
+			}
+			success = true
+			m.emit("index:changed", map[string]any{"reason": "download", "fileID": f.ID})
+			return nil
+		}
+		staging := filepath.Join(j.destDir, "."+final+".kistdirpart")
+		if err := os.RemoveAll(staging); err != nil { // 清掉上次残留的半截目录
+			return err
+		}
+		if err := extractZipTree(ctx, partPath, staging); err != nil {
+			os.RemoveAll(staging) // 失败不留半个目录
+			return err
+		}
+		if err := os.Rename(staging, filepath.Join(j.destDir, final)); err != nil {
+			os.RemoveAll(staging)
+			return err
+		}
+		os.Remove(partPath) // zip 临时产物已完成使命
+		success = true
+		m.emit("index:changed", map[string]any{"reason": "download", "fileID": f.ID})
+		return nil
+	}
 	if err := os.Rename(partPath, filepath.Join(j.destDir, final)); err != nil {
 		return err
 	}

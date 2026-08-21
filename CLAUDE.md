@@ -39,7 +39,7 @@ internal/crypto   加密核心(keyfile/blob 流式分块;v2 大小量化填充)
 internal/dav      WebDAV 客户端 + 重试退避(PUT/GET 自管,其余 gowebdav)
 internal/index    SQLite 明文索引(虚拟目录/文件/备注/缩略图/revision)
 internal/remote   远端对象语义(/kist/ 下随机名 blob + keyfile + index.enc)
-internal/transfer 传输管线(并发/进度/取消)+ 缩略图生成 + gc + 出站箱(--defer/push/verify)
+internal/transfer 传输管线(并发/进度/取消)+ 文件夹打包(一话一对象,TODO-15)+ 缩略图生成 + gc + 出站箱(--defer/push/verify)
 internal/backup   索引云备份与多设备恢复(LWW)
 internal/config   KIST_HOME 路径与 config.json
 internal/errs     AppError 错误码(前端按 Code 映射文案)

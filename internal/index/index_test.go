@@ -352,6 +352,38 @@ func TestThumbnailNoteUserMeta(t *testing.T) {
 	}
 }
 
+// pack 列往返与 user_version=2(TODO-15:目录打包条目标记)。
+func TestFilePackColumn(t *testing.T) {
+	db := newTestDB(t)
+	var ver int
+	if err := db.QueryRow("PRAGMA user_version").Scan(&ver); err != nil || ver != 2 {
+		t.Fatalf("user_version = %d(期望 2): %v", ver, err)
+	}
+	var id int64
+	err := db.WithTx(func(tx *sql.Tx) error {
+		var err error
+		id, err = db.InsertFile(tx, FileRow{
+			UUID: "p-uuid", FolderID: 1, Name: "第01话", Size: 4096, CipherSize: 4400,
+			SHA256: "sha", ChunkSize: 4096, BlobName: "p-blob", ModifiedAt: 1,
+			Pack:     true,
+			UserMeta: sql.NullString{String: `{"orig_size":3000,"entries":20}`, Valid: true},
+		})
+		return err
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	f, err := db.GetFile(id)
+	if err != nil || !f.Pack || !f.UserMeta.Valid {
+		t.Fatalf("pack 往返: %+v %v", f, err)
+	}
+	for _, e := range mustEntries(t, db, 1) {
+		if e.Name == "第01话" && !e.Pack {
+			t.Fatalf("ListFolder 应带 Pack 标记: %+v", e)
+		}
+	}
+}
+
 func TestGetFileByUUID(t *testing.T) {
 	db := newTestDB(t)
 	mustFile(t, db, 1, "x.txt", "")

@@ -1,6 +1,6 @@
 # kist 系统现状图(system-map)
 
-> **定位**:CLI 全流程完成时点(Phase 0–5 + TODO 07/08/11/12/13)的**现状快照**——回答"系统现在是什么样、动哪里会影响什么"。
+> **定位**:CLI 全流程完成时点(Phase 0–5 + TODO 07/08/11/12/13/15)的**现状快照**——回答"系统现在是什么样、动哪里会影响什么"。
 > 历史沿革看 `phase-*.md` 与 git 历史;加密格式全文规范看 `PLAN.md`;网盘实测特性看 `provider-notes.md`;用户视角看 `quickstart.md`。
 >
 > **维护约定**:每个 TODO/阶段合入时同步本文对应小节(与 quickstart 的同步约定并列)。
@@ -9,12 +9,12 @@
 ## 1. 一图流
 
 ```
-cmd/kistctl(CLI 壳,1134 行)        未来 Wails app.go(GUI 壳)
+cmd/kistctl(CLI 壳,1147 行)        未来 Wails app.go(GUI 壳)
         │                                   │
         └────────────┬──────────────────────┘
                      ▼
           transfer.Manager        上传/下载/push 管线:单调度器 + 动态并发(1–4),
-          (internal/transfer)     进度/取消/临时文件/出站箱/gc
+          (internal/transfer)     进度/取消/临时文件/文件夹打包/出站箱/gc
              │        │
              │        └────────► internal/backup   索引云备份/恢复(LWW)
              │                    internal/migrate  网盘间纯密文迁移
@@ -40,8 +40,8 @@ cmd/kistctl(CLI 壳,1134 行)        未来 Wails app.go(GUI 壳)
 
 | 包 | 行数 | 职责 | 关键文件/入口 |
 |---|---|---|---|
-| transfer | 1212 | 管线全部行为:并发调度、进度、取消、临时文件、出站箱、gc、缩略图 | `manager.go`(调度)、`upload.go`/`download.go`(旅程)、`push.go`(出站箱)、`gc.go`、`thumb.go` |
-| index | 935 | SQLite 明文索引:虚拟目录、文件账本、blob 登记、revision、快照/替换 | `db.go`(打开/WithTx/快照替换)、`schema.go`(迁移)、`files.go`、`folders.go`、`blobs.go`、`outbox.go` |
+| transfer | 1780 | 管线全部行为:并发调度、进度、取消、临时文件、文件夹打包(TODO-15)、出站箱、gc、缩略图 | `manager.go`(调度)、`upload.go`/`download.go`(旅程)、`pack.go`(粒度/zip/解压)、`push.go`(出站箱)、`gc.go`、`thumb.go` |
+| index | 942 | SQLite 明文索引:虚拟目录、文件账本、blob 登记、revision、快照/替换 | `db.go`(打开/WithTx/快照替换)、`schema.go`(迁移)、`files.go`、`folders.go`、`blobs.go`、`outbox.go` |
 | crypto | 754 | 加密核心:口令→MK 包装(keyfile)、流式分块加解密(blob)、v2 大小量化 | `blob.go`(Writer/Reader)、`keyfile.go`、`format.go`(常量与档位)、`keys.go`(HKDF) |
 | dav | 542 | WebDAV 语义 + 网络可靠性:定长 PUT、流式 GET、O(1) Probe、重试退避 | `client.go`、`retry.go` |
 | backup | 209 | 索引云备份与多设备恢复,LWW | `backup.go` |
@@ -52,17 +52,18 @@ cmd/kistctl(CLI 壳,1134 行)        未来 Wails app.go(GUI 壳)
 | logging | 58 | slog → KIST_HOME/kist.log,启动轮转留一代 | `logging.go` |
 | cmd/kistctl | 1134 | CLI 壳:16 个子命令、口令获取、参数重排、虚拟路径 | `main.go` |
 
-核心代码约 5.4k 行(不含测试),全仓 Go 约 8.3k 行。**transfer + index + crypto + dav 四个包占核心的 85%**,掌控它们即掌控项目。
+核心代码约 6.0k 行(不含测试),全仓 Go 约 8.9k 行。**transfer + index + crypto + dav 四个包占核心的 85%**,掌控它们即掌控项目。
 
 ## 3. put 的字节旅程(上传端到端)
 
 以 `kistctl put 大文件 --dest /备份` 为例,一个明文字节从磁盘到网盘的全路径:
 
 1. **口令→MK**(`main.go:unlockMK`):本地 `KIST_HOME/keyfile` 优先;没有则从远端拉一份并缓存 0600(这就是新设备/沙盒共用网盘时的路径)。Argon2id 派生 KEK 解包 MK;AEAD tag 失败 = 口令错,天然校验。
-2. **入队**(`manager.go:UploadPaths`):文件直接入队;文件夹两遍 WalkDir——先在一个事务里逐级建目录(**每级 id 都要记**,只记最深一级会让根下文件拿零值 folderID),再逐文件入队。符号链接跳过防环。
+2. **入队**(`manager.go:UploadPaths`):文件直接入队;文件夹默认按**打包粒度**解析(`pack.go:planPackTree`,TODO-15)——唯一判据"有无子目录":根为叶子则整根一个 pack 直挂 dest,否则逐层下降、每个叶子目录一个 pack,混杂层散文件独立入库,空目录保留为虚拟目录;一次事务建全部虚拟目录后入队。**校验遍一次收全问题再整次 put 拒绝**:非 UTF-8 文件名(提示 convmv 转码)、symlink/FIFO 等特殊文件。`--expand` 走旧的逐文件展开(两遍 WalkDir,先在一个事务里逐级建目录——**每级 id 都要记**,只记最深一级会让根下文件拿零值 folderID;符号链接静默跳过防环)。
 3. **调度**:单调度器 goroutine,每轮重读并发上限(默认 2,夹取 1–4,改设置即时生效),`cond` 唤醒派发。
 4. **流式加密**(`upload.go:runUpload` → `crypto.BlobWriter`):明文按 1MiB 读入,攒满 4MiB(默认块,`chunk_mib` 可调)封一个 XChaCha20-Poly1305 块。**关键规则:整块只有在"缓冲满且还有后续数据"时才封出**,否则留给 Close 以 final 标志封出——块数恒为 `max(1, ceil(size/chunk))`,空文件也是 1 个零长度末块。进度先按明文计,Close 后总数改为 明文+密文。临时文件在 `/tmp/kist/<传输ID>/blob`,全程内存 ≈ 一个块。
    - **v2 量化**(默认开,TODO-08):Close 前补零到档位——≤1MiB 归 4KiB 倍数(空文件 4KiB 档),大文件按 10% 阶梯。补零走与真实数据完全相同的分块/认证路径,但**绝不计入 OrigSize 与 SHA-256**。设 `"size_padding":"off"` 则写 v1(精确大小)。
+   - **pack 任务**(TODO-15):源是目录——`zip.NewWriter` 直挂 BlobWriter 单遍流式(条目全 Store 不再压缩,空目录写显式条目,条目 mtime 入 zip),词法序第一张图记为封面候选。索引行 `pack=1`,size 记 `bw.PlainTotal()`(v2 即档位值,**显示口径**——真实 origSize 在 sealedMeta,不得用索引 size 推明文长度),原目录规模(orig_size/entries)写 user_meta。
    - 头部 156B:40B 明文头 + 116B sealedMeta(加密的 fileID/origSize/chunkSize/noncePrefix/明文SHA/mtime/revision/deviceID)。Writer 先占位,Close 时 Seek 回填——源文件单遍读取。
 5. **缩略图**(`thumb.go`,仅图片):嗅探 512B 判型(jpeg/png/gif/bmp/webp),最长边 512px,JPEG q80 降级 / 透明转 PNG,≤128KB。**任何失败只 Warn 不阻断**;非图片静默跳过。
 6. **blob 名** = 16 随机字节 hex(32 字符),与文件名完全无关 → 并发上传永不撞名,重名消解推迟到索引事务内(`UniqueFileName` 追加 "(1)")。
@@ -82,7 +83,7 @@ cmd/kistctl(CLI 壳,1134 行)        未来 Wails app.go(GUI 壳)
 3. `crypto.NewBlobReader` **打开即校验**:magic/版本 → sealedMeta 解密(**失败 = ErrWrongKey**,典型场景:config 指向了另一个账户的网盘)→ 长度总校验 `156 + 16n + 明文区总长`(v2 按 bucketSize 算),不符即拒——截断/追加在此拦截。
 4. 流式解密到目标目录 `.<名字>.kistpart`(0600)。逐块 Open(块 AAD 绑定序号+final,重排/移花接木在此暴露);v2 只交付前 OrigSize 字节,纯补零块认证后整块丢弃。
 5. **EOF 即终检**:底层必须恰好耗尽(末块后无剩余)+ 流式 SHA-256 与头部声明一致。任一不过 → 删除 .part,报 CORRUPT,**绝不落盘**。
-6. 全部通过 → rename 原子落盘(目标已存在则 "(1)" 递增)。
+6. 全部通过 → 落盘:普通文件 rename 原子落盘(目标已存在则 "(1)" 递增);**pack 条目**(TODO-15)默认解压到 `.<名>.kistdirpart` 再**整体 rename** 还原成文件夹——解压断言:条目名合法 UTF-8 且不逃逸目标目录(zip-slip 同套防御),条目 mtime 尽力还原;`--keep-zip` 则改落 `<名>.zip`(喂阅读器可改名 .cbz)。
 
 ## 5. 加密格式速查(全文规范见 PLAN.md)
 
@@ -115,6 +116,8 @@ cmd/kistctl(CLI 壳,1134 行)        未来 Wails app.go(GUI 壳)
 
 **files.state**:`uploading`(--defer 记账,不可 get)→ `ready`(PUT 完成/push/verify 收账)。`missing` **预留未启用**(尚无生产调用方,预留给"远端对象被外力删除"的检测)。
 
+**files.pack**(TODO-15,schema v2):目录打包条目标记——明文区是一个标准 zip(Store),get 还原成文件夹;其 size 为量化后显示值。
+
 **blobs.state**(gc 账本,只登记文件 blob;keyfile/index.enc 不入账):`active` → `trash`(rm 时标记)→ 物理删除(gc 确认远端存在后);`pending` 为出站箱挂账。`orphan` 不是落库状态,是 gc 的报告概念(远端有、索引无)。
 
 **Transfer.Phase**(一次传输的生命周期):`queued → encrypting → uploading → done`;下载 `queued → downloading → decrypting → done`;出站箱分支终态 `deferred`;异常 `error | canceled`。
@@ -142,6 +145,7 @@ cmd/kistctl(CLI 壳,1134 行)        未来 Wails app.go(GUI 壳)
 12. push 与 migrate 是**纯密文搬运**:不解锁、不触碰明文,不需要口令。
 13. 迁移 `Failed>0` 时禁止 `--switch`。
 14. 远端对象名与文件名无关:并发上传不撞名,重名消解只在索引事务内发生。
+15. pack 条目(TODO-15)明文区恰为一个标准 zip;上传校验遍**整次拒绝**坏树(非 UTF-8 名/特殊文件)不留半套索引;解压侧断言(UTF-8/不逃逸)+ 临时目录整体 rename,失败不落半个目录。
 
 ## 9. 失败模式与恢复路径
 
@@ -151,6 +155,7 @@ cmd/kistctl(CLI 壳,1134 行)        未来 Wails app.go(GUI 壳)
 | PUT 反复失败 | dav 层重试 5 次(1s→30s ±20% 抖动,尊重 Retry-After 秒数形式;只重试网络错/5xx/429),整体重传无断点 | 任务失败;弱网改用 `put --defer` + 择机 push/手工搬运 |
 | PUT 成功但写索引失败 | 远端留下孤儿 blob,Warn 留痕 | `gc --dry-run` 确认后 `gc` 清理 |
 | 下载校验失败 | .part 删除,报 CORRUPT/WRONG_KEY,**不落盘** | WRONG_KEY 先查 config 是否指向别的账户网盘 |
+| pack 解压断言失败/中途取消 | .kistdirpart 与 zip 临时文件整体删除,不落半个目录 | 重试 get |
 | outbox push 失败 | keep 档(默认):挂账留证,可重试/手工搬运;discard 档:整笔回滚(索引行+产物) | keep → 重试 push 或手工搬运后 verify;discard → 重新 `put --defer` |
 | verify 大小不符 | 拒绝收账(疑似手工传输不完整) | 清掉远端对象重传 |
 | verify 时服务器不报大小(size=-1) | 仅按存在收账,结果里注明 | — |
@@ -175,10 +180,10 @@ cmd/kistctl(CLI 壳,1134 行)        未来 Wails app.go(GUI 壳)
 | config set | 存 WebDAV 配置 + Ping | 网盘密码 | `cmdConfig` |
 | init | 建 keyfile + 远端初始化(远端已有则拒绝) | ✓ | `cmdInit` |
 | unlock | 校验口令 | ✓ | `cmdUnlock` |
-| put [--dest] [--defer] | 加密上传 / 入出站箱 | ✓ | `Manager.UploadPaths/DeferPaths` |
+| put [--dest] [--defer] [--expand] | 加密上传(文件夹默认打包)/ 入出站箱 / 逐文件展开 | ✓ | `Manager.UploadPaths/DeferPaths` |
 | outbox list/push/verify/discard | 出站箱搬运与收账 | ✗(纯密文) | `push.go` |
-| ls / search / info / note | 索引浏览与备注 | ✗ | `index` 各查询 |
-| get | 下载解密 | ✓ | `Manager.DownloadTo` |
+| ls / search / info / note | 索引浏览与备注(ls 对 pack 条目显示 `P 名/`) | ✗ | `index` 各查询 |
+| get [--keep-zip] | 下载解密;pack 还原成目录(或落 zip) | ✓ | `Manager.DownloadTo` |
 | rm | 软删 + blob 标 trash | ✗ | `SoftDeleteFiles`+`MarkBlobTrash` |
 | gc [--dry-run] | 清 trash、报孤儿 | ✗ | `RunGC` |
 | backup / pull | 索引云备份 / 恢复 | ✓ | `backup` |
@@ -186,16 +191,16 @@ cmd/kistctl(CLI 壳,1134 行)        未来 Wails app.go(GUI 壳)
 
 注意:两个密码别混——WebDAV 账户密码 vs kist 加密口令(`KIST_PASS` 或 `--pass-stdin`)。`rm` 目前只删文件;目录软删 API(`SoftDeleteFolders`)已有、CLI 无入口(GUI 用)。
 
-## 12. 测试地图(64 项,验收必跑 `go test ./... -race`)
+## 12. 测试地图(77 项,验收必跑 `go test ./... -race`)
 
 | 包 | 数量 | 覆盖要点 |
 |---|---|---|
 | crypto | 16 | keyfile 往返/错口令/参数篡改/改口令;blob 往返/篡改/截断/重排/追加/final 冒充/错密钥/v2 填充完整性/流式内存峰值 |
 | dav | 10 | MKCOL 幂等、PUT 定长、503/429 退避、4xx 不重试、ctx 取消、Probe 精确请求与网络错误区分 |
-| index | 13 | 目录树、软删可见性、搜索、revision 并发单调、快照/替换往返、重名消解 |
+| index | 14 | 目录树、软删可见性、搜索、revision 并发单调、快照/替换往返、重名消解、pack 列往返 |
 | backup | 6 | 双设备往返、错密钥、无备份、损坏备份、uploading 状态随备份同步 |
-| transfer | 1 | 临时目录清理失败留痕(**单测薄,管线行为由 e2e 兜底**) |
+| transfer | 10 | 临时目录清理留痕;打包粒度五形态、校验整次拒绝、zip 往返(空文件/空目录/unicode/mtime)、取消、zip-slip、非 UTF-8 条目 |
 | logging | 2 | 轮转阈值 |
-| e2e | 16 | 全生命周期(put→ls/search→get 比对 sha→rm→gc)、重名、取消、错密钥、孤儿留痕;出站箱 6 例(verify 大小不符/push 两档政策/discard);迁移 4 例(断点续跑/无 keyfile/无 index.enc) |
+| e2e | 19 | 全生命周期(--expand 逐文件路径)、重名、取消、错密钥、孤儿留痕;出站箱 6 例(verify 大小不符/push 两档政策/discard);迁移 4 例(断点续跑/无 keyfile/无 index.enc);pack 2 例(多话对象数=叶数/还原 SHA/keep-zip、单话直挂) |
 
-e2e 起本地内存 WebDAV(x/net/webdav)跑真实 Manager——**transfer 的行为正确性实际由这 16 项 e2e 担保**,改管线后必跑 `go test ./internal/e2e/ -timeout 600s`。
+e2e 起本地内存 WebDAV(x/net/webdav)跑真实 Manager——**transfer 的行为正确性实际由这 19 项 e2e 担保**,改管线后必跑 `go test ./internal/e2e/ -timeout 600s`。
