@@ -32,7 +32,7 @@ v0.1 后的候选增强每项一篇独立评估文档,放在 [`todo/`](todo/),�
 ## 全局约定
 
 - Go module 名:`kist`;Go ≥ 1.24(开发机 1.26.6)
-- 所有 wails 命令带 `-tags webkit2_41`(Ubuntu 24.04 仅有 webkit2gtk-4.1;若装的是 4.0 则省略该 tag)
+- 所有 wails 命令带 `-tags webkit2_41`(Ubuntu 24.04 仅有 webkit2gtk-4.1;若装的是 4.0 则省略该 tag;Arch 仓库已无 4.0,tag 恒必带)
 - **依赖保持纯 Go、无 CGO**(SQLite 用 `modernc.org/sqlite`,不用系统 keyring)——这是能从 Linux 交叉编译出 Windows .exe 的前提
 - 本地数据目录:`os.UserConfigDir()/kist`,可用环境变量 `KIST_HOME` 覆盖(测试与多设备模拟用):
   - `config.json` — WebDAV 地址/用户名/设置(权限 0600;密码仅显式勾选"记住密码"时写入)
@@ -40,7 +40,7 @@ v0.1 后的候选增强每项一篇独立评估文档,放在 [`todo/`](todo/),�
   - `index.db` — 明文索引(SQLite, WAL)
   - `backups/` — 被替换/归档的旧索引
 - 临时文件:`os.TempDir()/kist/`,Manager 启动时清空上次残留
-- 验收命令默认在项目根 `/home/ubuntu/Projects/kist` 执行
+- 验收命令默认在项目根执行(本机 `/home/0x3ea/Projects/kist`)
 - 每阶段完成后:把文件顶部"状态"改为"完成",勾掉任务清单
 - **代码风格:必要处添加中文注释**(包文档、格式常量、关键算法步骤、易错边界);标识符保持英文,提交信息用中文并适当详细
 
@@ -54,7 +54,7 @@ v0.1 后的候选增强每项一篇独立评估文档,放在 [`todo/`](todo/),�
 | 3 index | 完成 |
 | 4 管线+CLI | 完成 |
 | 5 备份同步(CLI)| 完成 |
-| 6 Wails 环境 | 未开始 |
+| 6 Wails 环境 | 完成 |
 | 7 GUI | 未开始 |
 | 8 收尾打包 | 未开始 |
 

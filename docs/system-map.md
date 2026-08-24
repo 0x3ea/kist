@@ -1,6 +1,6 @@
 # kist 系统现状图(system-map)
 
-> **定位**:CLI 全流程完成时点(Phase 0–5 + TODO 07/08/11/12/13/15)的**现状快照**——回答"系统现在是什么样、动哪里会影响什么"。
+> **定位**:Phase 0–6(CLI 全流程 + GUI 脚手架合入)+ TODO 07/08/11/12/13/15 时点的**现状快照**——回答"系统现在是什么样、动哪里会影响什么"。
 > 历史沿革看 `phase-*.md` 与 git 历史;加密格式全文规范看 `PLAN.md`;网盘实测特性看 `provider-notes.md`;用户视角看 `quickstart.md`。
 >
 > **维护约定**:每个 TODO/阶段合入时同步本文对应小节(与 quickstart 的同步约定并列)。
@@ -9,7 +9,7 @@
 ## 1. 一图流
 
 ```
-cmd/kistctl(CLI 壳,1147 行)        未来 Wails app.go(GUI 壳)
+cmd/kistctl(CLI 壳,1147 行)        main.go+app.go(Wails GUI 壳,Phase 6 模板态,Phase 7 改造)
         │                                   │
         └────────────┬──────────────────────┘
                      ▼
@@ -50,9 +50,10 @@ cmd/kistctl(CLI 壳,1147 行)        未来 Wails app.go(GUI 壳)
 | config | 112 | KIST_HOME 路径、config.json、设置归一化 | `config.go` |
 | errs | 64 | AppError 错误码(CLI/GUI 共用文案映射) | `errs.go` |
 | logging | 58 | slog → KIST_HOME/kist.log,启动轮转留一代 | `logging.go` |
-| cmd/kistctl | 1134 | CLI 壳:16 个子命令、口令获取、参数重排、虚拟路径 | `main.go` |
+| cmd/kistctl | 1147 | CLI 壳:16 个子命令、口令获取、参数重排、虚拟路径 | `main.go` |
+| 根 main/app | 63 | Wails GUI 壳:Phase 6 合入的 vue-ts 模板(绑定/四页面待 Phase 7) | `main.go`、`app.go`、`frontend/` |
 
-核心代码约 6.0k 行(不含测试),全仓 Go 约 8.9k 行。**transfer + index + crypto + dav 四个包占核心的 85%**,掌控它们即掌控项目。
+核心代码约 6.0k 行(不含测试,另含 GUI 壳模板 63 行),全仓 Go 约 9.4k 行。**transfer + index + crypto + dav 四个包占核心的 85%**,掌控它们即掌控项目。
 
 ## 3. put 的字节旅程(上传端到端)
 
