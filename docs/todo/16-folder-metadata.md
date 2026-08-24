@@ -1,6 +1,6 @@
 # TODO-16 — 作品级元数据与聚合视图(目录元数据 + tag + 移动)
 
-> 状态:候选(2026-08-21 随 TODO-15 粒度规则的讨论收敛;聚合的"话数"语义依赖 15 的 pack 列)
+> 状态:立项实施中(2026-08-24;封面三级回退链与元数据三不原则随评审定稿,见对应小节)
 > 来源:漫画库浏览需求——浏览的决策单元是作品,不是话
 
 ## 问题
@@ -30,19 +30,25 @@ CREATE TABLE folder_tags (
 ```
 
 - CLI:`meta set <目录> --note/--tag …`、`meta list`;`Search` 扩展:目录名与目录 tag 进检索面。
+- **元数据三不原则**:不继承、不合并、无告警——tag/作者/note 是文件夹自身属性,父子各自持有、互不感知;聚合面(FolderSummary)只聚合计数,永不聚合元数据,父子"冲突"场景结构性不存在。哑远端约束同款:写在哪个目录就属于哪个目录,kist 不做解释。
 
 ### 聚合视图(纯查询,零 schema)
 
-`FolderSummary(folderID)` 递归子树聚合:`PackCount / FileCount / TotalSize / LatestAt / PendingCount(state=uploading)/ CoverFileID`。
+`FolderSummary(folderID)` 递归子树聚合:`PackCount / FileCount / TotalSize / LatestAt / PendingCount(state=uploading)/ CoverFileIDs`(三级链见下节)。
 
 - 实现:**不用递归 CTE**,沿用 `loadFolderInfos` 先例(全量载入内存建树,个人规模毫秒级,与 Search 的内存拼路径同风格);
 - CLI:`ls` 目录条目附带子树摘要(`作品A/  12 话 · 8.2GB · ← 08-01`,待传话数单列)——对任何目录普遍有用,不限漫画;
-- GUI(Phase 7 设计输入):`ListCards(parentID) → []FolderCard{Title, PackCount, FileCount, TotalSize, LatestAt, PendingCount, CoverFileID, Author, Tags}`。Files.vue 增**卡片视图(用户切换,而非逐目录判断身份)**:`PackCount > 0` 措辞"N 话",否则"N 个文件";进作品才是紧凑话列表(虚拟滚动);缓存按 revision 失效(`index:changed` 事件现成)。
+- GUI(Phase 7 设计输入):`ListCards(parentID) → []FolderCard{Title, PackCount, FileCount, TotalSize, LatestAt, PendingCount, CoverFileIDs, Author, Tags}`。Files.vue 增**卡片视图(用户切换,而非逐目录判断身份)**:`PackCount > 0` 措辞"N 话",否则"N 个文件";封面按三级链渲染(自定义单图满铺 → 派生四宫格,空位留白 → 默认四格);进作品才是紧凑话列表(虚拟滚动);缓存按 revision 失效(`index:changed` 事件现成)。
 
 ### 封面引用(零新增机制)
 
-- 派生默认:子树内第一个带缩略图的 pack(15 打包时抽的首页),`CoverFileID` 即其引用;
-- 自定义:cover.jpg 作为**普通文件** put 进作品目录 + 目录元信息 `cover_file_id` 指向——复用全部文件管线(加密/出站箱/备份/gc),不发明"封面 blob"类别;换封面 = 改引用,零流量;引用悬空 → 回退派生默认;
+**三级回退链,单值改多值**——`FolderSummary`/`FolderCard` 返回 `CoverFileIDs []int64`(≤4),纯查询零 schema:
+
+1. **自定义封面**:`cover_file_id` 指向的文件单图满铺。cover.jpg 作为**普通文件** put 进作品目录 + 目录元信息指向——复用全部文件管线(加密/出站箱/备份/gc),不发明"封面 blob"类别;换封面 = 改引用,零流量;引用悬空 → 落第 2 级;
+2. **派生拼贴**:2×2 宫格**按位置对应**子条目(目录与文件)名称自然序的前四个——每格显示该子条目的封面:子目录取其自定义封面或递归解析的首张缩略图,子文件取其缩略图。**不跳过**无封面的子条目,该格渲染默认占位——位置即信息,第几格空缺一目了然;子条目不足四个时尾部**留白**。`CoverFileIDs` 长度 = min(4, 子条目数),0 值即"此格默认占位";
+3. **默认四格**:无任何子条目(空作品)时,按目录名 hash 从内置占位图集稳定挑 4 张——渲染期决定、零存储,与扫描定序同理保证两次打开一致。
+
+- 派生扫描一次遍历子树顺带收集,与原单封面方案同量级;每卡片 `GetThumbnail` 至多 4 次,缩略图在索引内,毫秒级;
 - 与 TODO-10 前向兼容:缩略图字节将来出库,引用不变。
 
 ### MoveEntries(纯索引,零远端流量)
