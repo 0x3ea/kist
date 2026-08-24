@@ -40,7 +40,7 @@ func (m *Manager) runDownload(j *job) error {
 	// ---- 阶段一:GET blob 到临时文件 ----
 	blobPath := filepath.Join(tmpDir, "blob")
 	m.setPhase(tr, PhaseDownloading)
-	if err := m.deps.Remote.GetBlob(ctx, f.BlobName, blobPath, func(got int64) {
+	if err := m.remoteSnapshot().GetBlob(ctx, f.BlobName, blobPath, func(got int64) {
 		m.setProgress(tr, got)
 	}); err != nil {
 		return err

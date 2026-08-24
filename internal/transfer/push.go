@@ -58,7 +58,7 @@ func (m *Manager) runPush(j *job) error {
 	defer bf.Close()
 	m.setPhase(tr, PhaseUploading)
 	m.setTotal(tr, st.Size())
-	err = m.deps.Remote.PutBlob(ctx, f.BlobName, bf, func(sent int64) {
+	err = m.remoteSnapshot().PutBlob(ctx, f.BlobName, bf, func(sent int64) {
 		m.setProgress(tr, sent)
 	})
 	if err != nil {

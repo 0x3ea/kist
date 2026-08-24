@@ -1,6 +1,6 @@
 # kist 系统现状图(system-map)
 
-> **定位**:Phase 0–6(CLI 全流程 + GUI 脚手架合入)+ TODO 07/08/11/12/13/15 时点的**现状快照**——回答"系统现在是什么样、动哪里会影响什么"。
+> **定位**:Phase 0–7(CLI 全流程 + GUI 壳)+ TODO 07/08/11/12/13/15/16 时点的**现状快照**——回答"系统现在是什么样、动哪里会影响什么"。
 > 历史沿革看 `phase-*.md` 与 git 历史;加密格式全文规范看 `PLAN.md`;网盘实测特性看 `provider-notes.md`;用户视角看 `quickstart.md`。
 >
 > **维护约定**:每个 TODO/阶段合入时同步本文对应小节(与 quickstart 的同步约定并列)。
@@ -9,7 +9,7 @@
 ## 1. 一图流
 
 ```
-cmd/kistctl(CLI 壳,1147 行)        main.go+app.go(Wails GUI 壳,Phase 6 模板态,Phase 7 改造)
+cmd/kistctl(CLI 壳,1440 行)        main.go+app*.go(Wails GUI 壳,Phase 7:31 个绑定 + 四页面)
         │                                   │
         └────────────┬──────────────────────┘
                      ▼
@@ -51,9 +51,32 @@ cmd/kistctl(CLI 壳,1147 行)        main.go+app.go(Wails GUI 壳,Phase 6 模板
 | errs | 64 | AppError 错误码(CLI/GUI 共用文案映射) | `errs.go` |
 | logging | 58 | slog → KIST_HOME/kist.log,启动轮转留一代 | `logging.go` |
 | cmd/kistctl | 1440 | CLI 壳:18 个子命令、口令获取、参数重排、虚拟路径 | `main.go` |
-| 根 main/app | 63 | Wails GUI 壳:Phase 6 合入的 vue-ts 模板(绑定/四页面待 Phase 7) | `main.go`、`app.go`、`frontend/` |
+| 根 main/app | ~1300 | Wails GUI 壳(Phase 7):31 个绑定方法、事件转发、防抖自动备份、退出前备份;四页面 vue-ts ~2.2k 行(手写 CSS,零新前端依赖) | `app.go`(状态/解锁/生命周期)、`app_browse.go`(浏览/元数据)、`app_transfer.go`(传输/维护)、`main.go`、`frontend/src/` |
 
-核心代码约 6.8k 行(不含测试,另含 GUI 壳模板 63 行),全仓 Go 约 10.9k 行。**transfer + index + crypto + dav 四个包占核心的 85%**,掌控它们即掌控项目。
+核心代码约 6.8k 行(不含测试,另含 GUI 壳 ~1300 行),全仓 Go 约 12.1k 行。**transfer + index + crypto + dav 四个包占核心的 85%**,掌控它们即掌控项目。
+
+### 2.5 Wails GUI 壳(Phase 7)
+
+GUI 是纯壳:**零业务逻辑,只编排 internal/***。与 CLI 的关系是同一核心的两个薄壳入口(CLI 的 `loadStore/unlockMK/newManager` helper 在 `app.go` 有同构实现)。
+
+**App 结构**(`app.go`):`mu` 保护 cfg/store/mk/unlocked/backupTimer/lastBackupRev;`db`/`mgr` 在 startup 一次构造视为不可变(`index.ReplaceWith` 原句柄换库,恢复后 Manager 仍有效)。MK 经 `mkSnapshot()` 闭包注入管线,未解锁返回 false → 任务以 LOCKED 失败。
+
+**绑定分组**(31 个,全部 `defer panicGuard` 防 panic 崩窗口,错误出口统一 `wrap`):
+
+| 分组 | 方法 | 说明 |
+|---|---|---|
+| 状态/解锁 | GetAppState / Get·SaveWebDAVConfig / TestConnection / CreateAccount / Unlock / ImportFromRemote / Lock / ChangePassphrase | AppState 含 HasLocalKeyfile(Lock 页三分支判定);Unlock 的 SuggestPullIndex = 本地空库 + O(1) Probe 远端 index.enc |
+| 浏览 | ListFolder / SearchAll / FileInfo / GetThumbnail / SetNote / SetUserMeta / DeleteEntries / EnsureFolder / MoveFiles / Get·UpdateFolderMeta | ListFolder 绑定层合成面包屑+条目+FolderSummaries(一次往返);FileDetail 是摊平 NullInt64 的 DTO;UpdateFolderMeta 直传指针语义(nil=不动/零值=清除) |
+| 传输 | PickFiles / PickDir / UploadPaths / DownloadTo / CancelTransfer / Transfers | 对话框在 Go 侧(v2.15 JS 运行时无 Open*Dialog);上传默认 pack、下载默认解压,不暴露 expand/keepZip |
+| 设置/维护 | Get·SaveSettings / BackupIndexNow / PreviewGC / RunGC | GC 两步确认;孤儿只报告 |
+
+**事件接线**:管线的 `Emit` 回调即 `onTransferEvent`——全部事件透传 `runtime.EventsEmit`,其中 `index:changed` 同时驱动壳层防抖备份(App 是转发器+消费者,不经 EventsOn 自我订阅)。startup 事件先于前端订阅即丢失 → 前端 `store.init()` 主动拉初值。
+
+**防抖自动备份**(壳层机制,phase-7 约定):`index:changed` → 重置 30s `time.AfterFunc`(仅 AutoBackup 开且已解锁)→ `BackupNow`(Background+60s 超时,忙则重排不丢变更)→ notify。**退出前备份不受 AutoBackup 限制**:shutdown 时已解锁且 `db.Revision() > lastBackupRev`(会话内追踪,基线=解锁时;`sync_state.last_backup_at` 只存时间不存 revision)则补一次,失败仅记日志。
+
+**错误码传递**:Wails 把绑定 error 序列化为纯字符串 reject promise,而 `AppError.Error()` 只有 Msg——壳层 `codedError` 统一包 `"[CODE] Msg"`,前端 `errors.ts` 正则反解映射中文文案。`internal/errs` 不动(CLI 输出不受影响)。
+
+**SaveWebDAVConfig 后热更新**:重建 store 后调 `mgr.SetRemote()`(Phase 7 给 Manager 补的方法,worker 持 `remoteSnapshot()` 快照防 data race)——向导首配时 mgr 的 Remote 还是 nil,也靠这里补上。调用在 `a.mu` 外:worker 的 Emit 回调反向拿 a.mu,锁内互嵌会 ABBA。
 
 ## 3. put 的字节旅程(上传端到端)
 
@@ -198,10 +221,11 @@ cmd/kistctl(CLI 壳,1147 行)        main.go+app.go(Wails GUI 壳,Phase 6 模板
 
 注意:两个密码别混——WebDAV 账户密码 vs kist 加密口令(`KIST_PASS` 或 `--pass-stdin`)。`rm` 目前只删文件;目录软删 API(`SoftDeleteFolders`)已有、CLI 无入口(GUI 用)。
 
-## 12. 测试地图(89 项,验收必跑 `go test ./... -race`)
+## 12. 测试地图(97 项,验收必跑 `go test ./... -race`)
 
 | 包 | 数量 | 覆盖要点 |
 |---|---|---|
+| 根(GUI 壳) | 8 | headless 绑定层:codedError 格式、ListFolder 合成(null 归一/摘要批量)、SearchAll 三路命中、路径拆分(`..` 拒绝)、EnsureFolder 幂等+移动落点、删除(软删+trash/目录隐藏/空选拒绝)、元数据指针语义、缩略图 NOT_FOUND 与详情投影;顺带逼出 cover 清除的 FK 缺陷 |
 | crypto | 16 | keyfile 往返/错口令/参数篡改/改口令;blob 往返/篡改/截断/重排/追加/final 冒充/错密钥/v2 填充完整性/流式内存峰值 |
 | dav | 13 | MKCOL 幂等、PUT 定长、503/429 退避、4xx 不重试、ctx 取消、Probe 精确请求与网络错误区分 |
 | index | 21 | 目录树、软删可见性、搜索、revision 并发单调、快照/替换往返、重名消解、pack 列往返;TODO-16:元数据往返/死 tag 清理、目录检索三路命中+软删祖先、子树聚合、封面三级回退(悬空/混合序/截断/留白)、纯索引移动+回滚、元数据经快照存活 |

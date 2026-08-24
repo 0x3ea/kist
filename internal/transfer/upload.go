@@ -180,7 +180,7 @@ func (m *Manager) runUpload(j *job) error {
 	if err != nil {
 		return err
 	}
-	err = m.deps.Remote.PutBlob(ctx, blobName, bf, func(sent int64) {
+	err = m.remoteSnapshot().PutBlob(ctx, blobName, bf, func(sent int64) {
 		m.setProgress(tr, int64(meta.OrigSize)+sent)
 	})
 	bf.Close()

@@ -1,8 +1,8 @@
 # Phase 7 — Wails GUI
 
-> 状态:未开始
+> 状态:代码完成(2026-08-25)——自动化验收全过、沙盒冒烟通过;**交互手测清单(验收标准 1 的 11 条 + TODO-16 增量)待逐条过**,过完改"完成"
 > 前置:Phase 6(环境与脚手架已合入);备份能力来自 Phase 5,本阶段负责它的 UI 接线
-> 产出:改造后的 `main.go` / `app.go`、`frontend/src/` 四页面、Makefile
+> 产出:改造后的 `main.go` / `app.go`(拆三文件)/ `frontend/src/` 四页面、Makefile
 
 ## 目标
 
@@ -10,12 +10,12 @@
 
 ## 要做什么(任务清单)
 
-- [ ] `app.go`:App struct、生命周期(startup/shutdown)、全部绑定方法、事件发射
-- [ ] `internal/errs` 错误码 → 前端文案映射
-- [ ] 前端:App.vue / store.ts / Lock.vue / Files.vue / Transfers.vue / Settings.vue
-- [ ] 备份 UI 接线:`BackupIndexNow` / `ImportFromRemote` / 防抖自动备份 + 退出前备份 / Lock.vue 新设备分支 / Settings 备份按钮
-- [ ] Makefile:`make dev` / `make build` / `make test`(统一封装 `-tags webkit2_41`)
-- [ ] 按"验收标准"逐条手测
+- [x] `app.go`:App struct、生命周期(startup/shutdown)、全部绑定方法、事件发射
+- [x] `internal/errs` 错误码 → 前端文案映射(壳层 codedError 方案,见下)
+- [x] 前端:App.vue / store.ts / Lock.vue / Files.vue / Transfers.vue / Settings.vue
+- [x] 备份 UI 接线:`BackupIndexNow` / `ImportFromRemote` / 防抖自动备份 + 退出前备份 / Lock.vue 新设备分支 / Settings 备份按钮
+- [x] Makefile:`make dev` / `make build` / `make test` / `make check`(统一封装 `-tags webkit2_41`)
+- [ ] 按"验收标准"逐条手测(交互部分)
 
 ## 设计说明
 
@@ -90,6 +90,23 @@ App 持有 ctx、cfg、db、dav client、remote.Store、transfer.Manager、MK(�
 
 `make dev` 打开窗口即可完成完整使用循环(含新设备恢复);`make build` 产出 `build/bin/kist`。
 
+## 与签名草稿的差异(实施时定稿,均有原因)
+
+- **TODO-16 全量纳入**(用户拍板):绑定加 `SearchAll`(目录+文件合并)、`Get/UpdateFolderMeta`、`MoveFiles`、`EnsureFolder`;`ListFolder` 绑定层合成 `FolderView{Crumbs,Entries,Summaries}`(一次往返,FolderSummaries 批量建树);前端网格视图目录卡渲染封面宫格(`CoverMosaic`,CoverFileIDs ≤4,0=按目录名 hash 占位),列表视图目录行带摘要(CLI `summaryLine` 同款措辞)。
+- **`PickFiles`/`PickDir` 绑定**:Wails v2.15 的 JS 运行时**不暴露** Open*Dialog(`runtime.d.ts` 无导出,实测 wrapper 源码确认),对话框只能落 Go 侧。
+- **错误码传递**:Wails 把绑定 error 序列化为纯字符串 reject,`AppError.Error()` 只有 Msg——壳层 `codedError` 统一包 `"[CODE] Msg"`,前端 `errors.ts` 正则反解;`internal/errs` 不动(CLI 输出不受影响)。
+- **`AppState` 加 `HasLocalKeyfile`**:Lock 页三分支(向导/解锁/新设备恢复)的判定依据(前端无文件系统访问)。
+- **GC 两步**:`PreviewGC`/`RunGC` 两个绑定(孤儿仍只报告不删)。
+- **`FileDetail` DTO**:FileRow 的 `sql.NullInt64` JSON 形态是 `{Int64,Valid}` 对象,不可直接透传,摊平为 `*int64`。
+- **`mgr.SetRemote()`(internal/transfer 小补全)**:SaveWebDAVConfig 重建 store 后热更新管线端点(worker 持快照防 data race);Deps 其余项都是闭包动态读,Remote 是唯一需要显式替换的依赖。
+- **在途传输关窗确认**(OnBeforeClose):GTK 前端忽略自定义 Buttons,QuestionDialog 固定 Yes/No,判断按返回值 `"Yes"`。
+- **上传不暴露 expand / 下载不暴露 keep-zip**:GUI 走默认(pack/解压),高级用法留 CLI。
+
+## 实施中逼出的核心包修复
+
+- **`index.UpdateFolderMeta` cover 清除的 FK 违例**:`cover_file_id` 带 `REFERENCES files(id)`,清除(0)直写会触发外键失败(CLI `meta set --cover 0` 同样踩雷)——修正为 0 → NULL。GUI 绑定层测试发现。
+- **transfer worker 的 `deps.Remote` data race 隐患**:与 SetRemote 并发替换无同步,改为 worker 持 `remoteSnapshot()` 锁下快照。
+
 ## 验收标准
 
 1. `wails dev -tags webkit2_41` 启动无报错,以下手测清单逐条通过:
@@ -103,5 +120,12 @@ App 持有 ctx、cfg、db、dav client、remote.Store、transfer.Manager、MK(�
    - 改口令:旧口令解锁失败、新口令成功,已上传文件仍可下载
    - Lock 后界面回到解锁页,MK 已清零
    - **新设备恢复**:复制 config.json 到空 KIST_HOME 模拟新机器 → 启动 → Lock 页出现"从远端恢复"→ 输口令 → 文件列表与原设备一致(**含缩略图与备注**);Settings"立即备份"显示 revision 与时间;自动备份在上传 30s 后触发
+   - TODO-16 增量:目录行摘要/封面宫格显示正确;目录元数据(note/tag/封面)编辑保存生效;移动对话框纯索引移动(网盘零流量);搜索能按目录名/tag 命中并显示虚拟路径
 2. `wails build -tags webkit2_41` 成功,`./build/bin/kist` 启动冒烟通过
 3. `make test`(= `go test ./... -race`)全绿;`go vet ./...` 通过
+
+## 验收结果(2026-08-25)
+
+- ✅ 标准 2:`wails build -tags webkit2_41` 产出 `build/bin/kist`(16MB);沙盒 KIST_HOME 冒烟:进程存活、SIGTERM 优雅走 shutdown(未解锁时跳过备份)、启动噪音仅 Phase 6 已知两类(SIGUSR1 借用 / appmenu-gtk-module)
+- ✅ 标准 3:`go build ./... && go vet ./... && gofmt -l .` 全绿;`go test ./... -race -count=1` **97 项全过**(新增根包 headless 绑定测试 8 项:合成视图/搜索/路径拆分/删除/移动/元数据指针语义/缩略图 NOT_FOUND/错误码格式;`npm run build` 含 vue-tsc strict 亦过)
+- ⏳ 标准 1:交互手测清单待跑(需窗口操作;沙盒已预置数据,清单见上)

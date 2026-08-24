@@ -1,26 +1,102 @@
-html {
-    background-color: rgba(27, 38, 54, 1);
-    text-align: center;
-    color: white;
+/* style.css — 深色主题基础:延续模板底色的变量化版本。
+   组件样式各自 scoped,这里只放 reset、变量与跨页面复用的原子类。 */
+
+:root {
+  --bg: #1b2636;
+  --panel: #223145;
+  --panel-2: #2a3b52;
+  --line: #354a63;
+  --text: #dbe4f0;
+  --dim: #8ba0b8;
+  --accent: #4f8cff;
+  --accent-dim: #3a6bbf;
+  --warn: #e5a13c;
+  --err: #e05252;
+  --ok: #4caf7d;
+  --radius: 8px;
+}
+
+* {
+  box-sizing: border-box;
+  margin: 0;
+  padding: 0;
+}
+
+html,
+body,
+#app {
+  height: 100%;
 }
 
 body {
-    margin: 0;
-    color: white;
-    font-family: "Nunito", -apple-system, BlinkMacSystemFont, "Segoe UI", "Roboto",
-    "Oxygen", "Ubuntu", "Cantarell", "Fira Sans", "Droid Sans", "Helvetica Neue",
-    sans-serif;
+  background: var(--bg);
+  color: var(--text);
+  font-family: 'Nunito', 'Segoe UI', 'Noto Sans CJK SC', sans-serif;
+  font-size: 14px;
+  line-height: 1.5;
+  -webkit-font-smoothing: antialiased;
 }
 
-@font-face {
-    font-family: "Nunito";
-    font-style: normal;
-    font-weight: 400;
-    src: local(""),
-    url("assets/fonts/nunito-v16-latin-regular.woff2") format("woff2");
+/* 原子类:输入与按钮的统一样式(各页面 scoped 里直接用类名) */
+input[type='text'],
+input[type='password'],
+input[type='number'],
+select {
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  color: var(--text);
+  padding: 7px 10px;
+  font: inherit;
+  outline: none;
+  width: 100%;
 }
 
-#app {
-    height: 100vh;
-    text-align: center;
+input:focus,
+select:focus {
+  border-color: var(--accent);
+}
+
+button {
+  background: var(--panel-2);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  color: var(--text);
+  padding: 7px 14px;
+  font: inherit;
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+button:hover:not(:disabled) {
+  border-color: var(--accent);
+}
+
+button:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+button.primary {
+  background: var(--accent-dim);
+  border-color: var(--accent);
+}
+
+button.danger {
+  border-color: var(--err);
+  color: var(--err);
+}
+
+::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
+}
+
+::-webkit-scrollbar-thumb {
+  background: var(--line);
+  border-radius: 5px;
+}
+
+::-webkit-scrollbar-track {
+  background: transparent;
 }

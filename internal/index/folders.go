@@ -232,8 +232,12 @@ func (db *DB) UpdateFolderMeta(folderID int64, u FolderMetaUpdate) error {
 			}
 		}
 		if u.Cover != nil {
+			// Cover 指向 0 = 清除引用。列带 REFERENCES files(id),不存在
+			// id=0 的行,直接写 0 会触发外键失败(Phase 7 绑定层测试发现,
+			// CLI `meta set --cover 0` 同样踩雷)——清除必须落 NULL。
+			v := sql.NullInt64{Int64: *u.Cover, Valid: *u.Cover != 0}
 			if _, err := tx.Exec(
-				`UPDATE folders SET cover_file_id = ? WHERE id = ?`, *u.Cover, folderID); err != nil {
+				`UPDATE folders SET cover_file_id = ? WHERE id = ?`, v, folderID); err != nil {
 				return err
 			}
 		}

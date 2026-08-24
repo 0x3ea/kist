@@ -1,0 +1,170 @@
+<script setup lang="ts">
+// CardGrid.vue — 网格视图:目录卡 = 封面宫格 + 名称 + 摘要;文件卡 = 缩略图
+// 或类型占位 + 名称 + 大小。封面链已由索引层解析为 CoverFileIDs(≤4),
+// 自定义封面 = 单值满铺,由 CoverMosaic 按格数自适应。
+import { index } from '../../wailsjs/go/models'
+import { store, ensureThumb, openDetail, summaryText } from '../store'
+import { humanSize } from '../format'
+import CoverMosaic from './CoverMosaic.vue'
+import { onMounted, watchEffect } from 'vue'
+
+defineEmits<{ open: [id: number] }>()
+
+// 有缩略图的文件卡预取缩略图(负缓存下不反复请求)
+watchEffect(() => {
+  for (const e of store.folder.entries) {
+    if (!e.IsFolder) ensureThumb(e.ID)
+  }
+})
+onMounted(() => {
+  for (const e of store.folder.entries) {
+    if (e.IsFolder) (store.folder.summaries[String(e.ID)]?.CoverFileIDs ?? []).forEach((id) => id && ensureThumb(id))
+  }
+})
+
+function toggleFile(id: number) {
+  store.selection.has(id) ? store.selection.delete(id) : store.selection.add(id)
+}
+
+function cardClick(e: index.Entry) {
+  if (e.IsFolder) return
+  toggleFile(e.ID)
+  openDetail(e.ID)
+}
+</script>
+
+<template>
+  <div class="grid">
+    <div
+      v-for="e in store.folder.entries"
+      :key="e.ID"
+      class="card"
+      :class="{ sel: e.IsFolder ? store.folderSelection.has(e.ID) : store.selection.has(e.ID) }"
+      @click="e.IsFolder ? $emit('open', e.ID) : cardClick(e)"
+    >
+      <span
+        class="check"
+        :class="{ on: e.IsFolder ? store.folderSelection.has(e.ID) : store.selection.has(e.ID) }"
+        @click.stop="e.IsFolder ? (store.folderSelection.has(e.ID) ? store.folderSelection.delete(e.ID) : store.folderSelection.add(e.ID)) : toggleFile(e.ID)"
+      >
+      </span>
+      <CoverMosaic v-if="e.IsFolder" :ids="store.folder.summaries[String(e.ID)]?.CoverFileIDs ?? []" :name="e.Name" />
+      <div v-else class="thumb">
+        <img v-if="store.thumbs.get(e.ID)" :src="store.thumbs.get(e.ID)" alt="" />
+        <div v-else class="file-type" :class="{ pack: e.Pack }">{{ e.Pack ? '📦' : '📄' }}</div>
+      </div>
+      <div class="name" :title="e.Name">
+        {{ e.Name }}
+        <em v-if="e.State === 'uploading'" class="tag">待上传</em>
+      </div>
+      <div class="meta dim">{{ e.IsFolder ? summaryText(e.ID) : humanSize(e.Size) }}</div>
+    </div>
+    <div v-if="store.folder.entries.length === 0" class="empty">空目录</div>
+  </div>
+</template>
+
+<style scoped>
+.grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(150px, 1fr));
+  gap: 14px;
+  padding: 4px;
+  align-content: start;
+}
+
+.card {
+  position: relative;
+  cursor: pointer;
+  border: 2px solid transparent;
+  border-radius: 10px;
+  padding: 6px;
+}
+
+.card:hover {
+  background: var(--panel);
+}
+
+.card.sel {
+  border-color: var(--accent);
+  background: rgba(79, 140, 255, 0.08);
+}
+
+.check {
+  position: absolute;
+  top: 10px;
+  left: 10px;
+  width: 16px;
+  height: 16px;
+  border-radius: 4px;
+  border: 1.5px solid var(--line);
+  background: rgba(27, 38, 54, 0.7);
+  z-index: 2;
+}
+
+.check.on {
+  background: var(--accent);
+  border-color: var(--accent);
+}
+
+.check.on::after {
+  content: '✓';
+  color: #fff;
+  font-size: 12px;
+  position: absolute;
+  left: 2px;
+  top: -2px;
+}
+
+.thumb {
+  aspect-ratio: 1;
+  border-radius: 6px;
+  overflow: hidden;
+  background: var(--panel-2);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.thumb img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+
+.file-type {
+  font-size: 40px;
+  opacity: 0.6;
+}
+
+.name {
+  margin-top: 6px;
+  font-size: 13px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.meta {
+  font-size: 12px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.tag {
+  font-style: normal;
+  color: var(--warn);
+  font-size: 12px;
+}
+
+.dim {
+  color: var(--dim);
+}
+
+.empty {
+  grid-column: 1 / -1;
+  text-align: center;
+  color: var(--dim);
+  padding: 40px 0;
+}
+</style>

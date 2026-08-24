@@ -120,6 +120,26 @@ func NewManager(d Deps) *Manager {
 
 func tempRoot() string { return filepath.Join(os.TempDir(), "kist") }
 
+// SetRemote 替换远端存储(GUI 保存新 WebDAV 配置后热更新):之后发起的网络
+// 调用走新端点,在途任务持有旧 client 自行收尾。Deps 其余项都是闭包动态读,
+// Remote 是唯一需要显式替换的依赖。nil 不接受——置空意味着失能,调用方不该这么做。
+func (m *Manager) SetRemote(s *remote.Store) {
+	if s == nil {
+		return
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.deps.Remote = s
+}
+
+// remoteSnapshot 在锁下取远端存储:worker 任务期持有快照,避免与 SetRemote 的
+// 并发替换构成 data race(-race 可检出)。
+func (m *Manager) remoteSnapshot() *remote.Store {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.deps.Remote
+}
+
 // UploadOptions 是上传的可选项(TODO-15)。
 type UploadOptions struct {
 	// Expand 保留逐文件展开的旧行为(每文件一 blob,文件夹镜像为虚拟
