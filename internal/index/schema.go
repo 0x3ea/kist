@@ -2,12 +2,34 @@ package index
 
 // migrations 按版本顺序排列,由 db.migrate() 按 PRAGMA user_version 逐个应用。
 // 结构变更时只允许追加新脚本,不得修改历史脚本(老库要靠它们升级)。
-var migrations = []string{v1Schema, v2AddPack}
+var migrations = []string{v1Schema, v2AddPack, v3FolderMeta}
 
 // v2(TODO-15):files.pack 标记"目录打包条目"——明文区是一个 zip,
 // get 侧解压还原成文件夹。size 记量化后的明文区总长(显示值,
 // 真实 origSize 以 sealedMeta 为准,不得用索引 size 推明文长度)。
 const v2AddPack = `ALTER TABLE files ADD COLUMN pack INTEGER NOT NULL DEFAULT 0;`
+
+// v3(TODO-16):目录用户元数据与 tag。
+// note/user_meta 与 files 对齐;cover_file_id 是封面三级回退链第 1 级——
+// 指向一个普通文件(通常叫 cover.jpg),复用全部文件管线,不发明封面 blob 类别;
+// 引用悬空(文件被软删/无缩略图)时渲染端自动落第 2 级派生拼贴。
+// tag 走独立表:过滤是 tag 的全部意义,LIKE-over-JSON 撑不起检索面。
+const v3FolderMeta = `
+ALTER TABLE folders ADD COLUMN note TEXT;
+ALTER TABLE folders ADD COLUMN user_meta TEXT;
+ALTER TABLE folders ADD COLUMN cover_file_id INTEGER REFERENCES files(id) ON DELETE SET NULL;
+
+CREATE TABLE IF NOT EXISTS tags (
+  id   INTEGER PRIMARY KEY,
+  name TEXT NOT NULL UNIQUE);
+
+CREATE TABLE IF NOT EXISTS folder_tags (
+  folder_id INTEGER NOT NULL REFERENCES folders(id) ON DELETE CASCADE,
+  tag_id    INTEGER NOT NULL REFERENCES tags(id) ON DELETE CASCADE,
+  UNIQUE(folder_id, tag_id));
+
+-- 按 tag 反查目录(SearchFolders 的 EXISTS 子查询走这头)
+CREATE INDEX IF NOT EXISTS ix_folder_tags_tag ON folder_tags(tag_id);`
 
 const v1Schema = `
 CREATE TABLE IF NOT EXISTS folders (

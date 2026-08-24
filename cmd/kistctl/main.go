@@ -45,8 +45,10 @@ const usageText = `用法:kistctl <子命令> [参数]
   unlock  --pass-stdin                  校验口令(本地 keyfile 优先,无则拉远端)
   put     <路径...> [--dest /目录] [--defer] [--expand] --pass-stdin  加密上传(文件夹默认按叶子目录打包,一话一对象;--expand 逐文件;--defer 只入出站箱)
   outbox  list|push|verify|discard       出站箱:待上传产物的搬运与收账(TODO-13)
-  ls      [/路径]                        列虚拟目录
-  search  <关键词>                       搜索文件名与备注
+  ls      [/路径]                        列虚拟目录(目录行附子树摘要:话数·大小·最近更新)
+  search  <关键词>                       搜索文件名、备注、目录名与目录 tag
+  meta    set <目录> [--note 文本] [--tag a,b] [--cover <uuid|id|0>]  设置目录元数据(不带 flag 则显示当前值);meta list 列出全部
+  mv      <uuid|id...> <目标目录>        纯索引移动文件,零远端流量(归属给错时的便宜纠错)
   get     <uuid|id> --to <目录> [--keep-zip] --pass-stdin  下载解密(文件夹条目还原成目录;--keep-zip 落 zip)
   info    <uuid|id>                      查看明细(时间/备注/缩略图)
   note    <id> [--set 文本]              查看/设置备注
@@ -89,6 +91,10 @@ func run(args []string) error {
 		err = cmdLs(rest)
 	case "search":
 		err = cmdSearch(rest)
+	case "meta":
+		err = cmdMeta(rest)
+	case "mv":
+		err = cmdMv(rest)
 	case "get":
 		err = cmdGet(rest)
 	case "info":
@@ -680,9 +686,22 @@ func cmdLs(args []string) error {
 		fmt.Println("(空目录)")
 		return nil
 	}
+	// 目录行附子树摘要(TODO-16):一次建树批量聚合,不逐目录重复载入
+	var folderIDs []int64
 	for _, e := range entries {
 		if e.IsFolder {
-			fmt.Printf("D %s/\n", e.Name)
+			folderIDs = append(folderIDs, e.ID)
+		}
+	}
+	sums := map[int64]index.FolderSummary{}
+	if len(folderIDs) > 0 {
+		if sums, err = db.FolderSummaries(folderIDs); err != nil {
+			return errs.From(err)
+		}
+	}
+	for _, e := range entries {
+		if e.IsFolder {
+			fmt.Printf("D %s/\t%s\n", e.Name, summaryLine(sums[e.ID]))
 			continue
 		}
 		mark := ""
@@ -696,6 +715,54 @@ func cmdLs(args []string) error {
 		fmt.Printf("F %s\t%d 字节%s\n", e.Name, e.Size, mark)
 	}
 	return nil
+}
+
+// summaryLine 渲染子树摘要:"12 话 · 8.2GB · ← 08-01,待传 2"。
+// 索引层(FolderSummary)只报计数,领域措辞在这一层落定:
+// PackCount>0 视为打包作品按"话"措辞,否则"个文件"——对相册/专辑原样适用。
+func summaryLine(s index.FolderSummary) string {
+	if s.FileCount == 0 {
+		return "空"
+	}
+	var b strings.Builder
+	if s.PackCount > 0 {
+		fmt.Fprintf(&b, "%d 话", s.PackCount)
+		if s.FileCount > s.PackCount {
+			fmt.Fprintf(&b, " · %d 个散文件", s.FileCount-s.PackCount)
+		}
+	} else {
+		fmt.Fprintf(&b, "%d 个文件", s.FileCount)
+	}
+	fmt.Fprintf(&b, " · %s", humanSize(s.TotalSize))
+	if s.LatestAt != 0 {
+		fmt.Fprintf(&b, " · ← %s", shortTime(s.LatestAt))
+	}
+	if s.PendingCount > 0 {
+		fmt.Fprintf(&b, ",待传 %d", s.PendingCount)
+	}
+	return b.String()
+}
+
+func humanSize(n int64) string {
+	switch {
+	case n >= 1<<30:
+		return fmt.Sprintf("%.1fGB", float64(n)/(1<<30))
+	case n >= 1<<20:
+		return fmt.Sprintf("%.1fMB", float64(n)/(1<<20))
+	case n >= 1<<10:
+		return fmt.Sprintf("%.1fKB", float64(n)/(1<<10))
+	default:
+		return fmt.Sprintf("%dB", n)
+	}
+}
+
+// shortTime 一年内省年份,更早带年份——摘要里的"← 08-01"形态。
+func shortTime(unix int64) string {
+	t := time.Unix(unix, 0)
+	if t.Year() == time.Now().Year() {
+		return t.Format("01-02")
+	}
+	return t.Format("2006-01-02")
 }
 
 func cmdSearch(args []string) error {
@@ -715,9 +782,17 @@ func cmdSearch(args []string) error {
 	if err != nil {
 		return errs.From(err)
 	}
-	if len(hits) == 0 {
+	// 目录命中在前:浏览的决策单元是作品(TODO-16),文件命中跟在后面
+	folderHits, err := db.SearchFolders(fs.Arg(0), 100)
+	if err != nil {
+		return errs.From(err)
+	}
+	if len(hits) == 0 && len(folderHits) == 0 {
 		fmt.Println("(无结果)")
 		return nil
+	}
+	for _, h := range folderHits {
+		fmt.Printf("D %d\t%s\t%s\n", h.ID, h.Path, folderMetaLine(h.Note, h.Tags, h.CoverFileID))
 	}
 	for _, h := range hits {
 		note := ""
@@ -725,6 +800,224 @@ func cmdSearch(args []string) error {
 			note = "  备注:" + h.Note
 		}
 		fmt.Printf("%d\t%s\t%d 字节%s\n", h.ID, h.Path, h.Size, note)
+	}
+	return nil
+}
+
+// folderMetaLine 把目录元数据压成一行(search 目录命中与 meta 共用)。
+func folderMetaLine(note string, tags []string, coverFileID int64) string {
+	var parts []string
+	if len(tags) > 0 {
+		parts = append(parts, "tag:"+strings.Join(tags, ","))
+	}
+	if note != "" {
+		parts = append(parts, "备注:"+note)
+	}
+	if coverFileID != 0 {
+		parts = append(parts, fmt.Sprintf("封面:%d", coverFileID))
+	}
+	if len(parts) == 0 {
+		return "-"
+	}
+	return strings.Join(parts, "  ")
+}
+
+// ---- 目录元数据与移动(TODO-16)----
+
+func cmdMeta(args []string) error {
+	if len(args) == 0 {
+		return errs.New(errs.BadConfig, "用法:kistctl meta <set <目录> --note/--tag/--cover | list>")
+	}
+	switch args[0] {
+	case "set":
+		return cmdMetaSet(args[1:])
+	case "list":
+		return cmdMetaList(args[1:])
+	default:
+		return errs.New(errs.BadConfig, "未知 meta 子命令 "+args[0]+"(可用:set|list)")
+	}
+}
+
+func cmdMetaSet(args []string) error {
+	fs := flag.NewFlagSet("meta set", flag.ContinueOnError)
+	note := fs.String("note", "", "备注(空串清除)")
+	tag := fs.String("tag", "", "tag 列表,逗号分隔(空串清空全部;全量覆盖语义)")
+	cover := fs.String("cover", "", "自定义封面:文件 uuid|id;传 0 清除引用(回退派生拼贴)")
+	if err := parseArgs(fs, args); err != nil {
+		return err
+	}
+	if fs.NArg() == 0 {
+		return errs.New(errs.BadConfig, "meta set 需要 <目录路径>(从根写起,如 /作品A)")
+	}
+	db, err := openIndex()
+	if err != nil {
+		return err
+	}
+	defer db.Close()
+	segs, err := splitVirtualPath(fs.Arg(0))
+	if err != nil {
+		return err
+	}
+	folderID, err := db.ResolveFolderPath(segs)
+	if err != nil {
+		return errs.From(err) // 元数据挂在已存在的目录上,不隐式建目录
+	}
+
+	// 与 note 命令同款探测:区分"未提供"与"提供了空串"(空串 = 清除)
+	var upd index.FolderMetaUpdate
+	fs.Visit(func(fl *flag.Flag) {
+		switch fl.Name {
+		case "note":
+			upd.Note = note
+		case "tag":
+			upd.Tags = parseTagList(*tag)
+		}
+	})
+	if flagProvided(fs, "cover") {
+		id, err := resolveCoverRef(db, *cover)
+		if err != nil {
+			return err
+		}
+		upd.Cover = &id
+	}
+	if upd.Note == nil && upd.Tags == nil && upd.Cover == nil {
+		// 不带任何 flag:显示当前元数据
+		m, err := db.GetFolderMeta(folderID)
+		if err != nil {
+			return errs.From(err)
+		}
+		fmt.Printf("%s\t%s\n", virtualPathOf(segs), folderMetaLine(m.Note, m.Tags, m.CoverFileID))
+		return nil
+	}
+	if err := db.UpdateFolderMeta(folderID, upd); err != nil {
+		return errs.From(err)
+	}
+	fmt.Println("已保存")
+	return nil
+}
+
+func cmdMetaList(args []string) error {
+	db, err := openIndex()
+	if err != nil {
+		return err
+	}
+	defer db.Close()
+	hits, err := db.ListFoldersWithMeta()
+	if err != nil {
+		return errs.From(err)
+	}
+	if len(hits) == 0 {
+		fmt.Println("(无目录元数据)")
+		return nil
+	}
+	for _, h := range hits {
+		fmt.Printf("%d\t%s\t%s\n", h.ID, h.Path, folderMetaLine(h.Note, h.Tags, h.CoverFileID))
+	}
+	return nil
+}
+
+// parseTagList 拆逗号分隔的 tag:去空白、滤空段。
+func parseTagList(s string) []string {
+	var tags []string
+	for _, t := range strings.Split(s, ",") {
+		if t = strings.TrimSpace(t); t != "" {
+			tags = append(tags, t)
+		}
+	}
+	return tags
+}
+
+// flagProvided 探测某个 flag 是否被显式提供(--cover 的空值有语义,不能靠默认值判断)。
+func flagProvided(fs *flag.FlagSet, name string) bool {
+	provided := false
+	fs.Visit(func(fl *flag.Flag) {
+		if fl.Name == name {
+			provided = true
+		}
+	})
+	return provided
+}
+
+// resolveCoverRef 把 --cover 的值(uuid|id|0)解析成 files.id;0 表示清除引用。
+func resolveCoverRef(db *index.DB, v string) (int64, error) {
+	if strings.TrimSpace(v) == "0" {
+		return 0, nil
+	}
+	f, err := resolveTarget(db, v)
+	if err != nil {
+		return 0, err
+	}
+	return checkCoverFile(db, f)
+}
+
+// checkCoverFile 校验封面引用的文件可用:已软删的拒绝;
+// 无缩略图放行但提示——封面第 1 级要求有缩略图,否则渲染端会回退派生拼贴。
+func checkCoverFile(db *index.DB, f index.FileRow) (int64, error) {
+	if f.DeletedAt.Valid {
+		return 0, errs.New(errs.BadConfig, "封面文件已删除:"+f.Name)
+	}
+	if _, _, err := db.GetThumbnail(f.ID); err != nil {
+		fmt.Printf("提示:%s 没有缩略图,封面将回退为派生拼贴\n", f.Name)
+	}
+	return f.ID, nil
+}
+
+// virtualPathOf 由段拼回虚拟路径(splitVirtualPath 的逆,仅展示用)。
+func virtualPathOf(segs []string) string {
+	if len(segs) == 0 {
+		return "/"
+	}
+	return "/" + strings.Join(segs, "/")
+}
+
+func cmdMv(args []string) error {
+	fs := flag.NewFlagSet("mv", flag.ContinueOnError)
+	if err := parseArgs(fs, args); err != nil {
+		return err
+	}
+	if fs.NArg() < 2 {
+		return errs.New(errs.BadConfig, "mv 需要 <uuid|id...> <目标目录>(最后一个参数是目标,从根写起)")
+	}
+	db, err := openIndex()
+	if err != nil {
+		return err
+	}
+	defer db.Close()
+	targets := fs.Args()[:fs.NArg()-1]
+	segs, err := splitVirtualPath(fs.Args()[fs.NArg()-1])
+	if err != nil {
+		return err
+	}
+	// 目标目录不存在则逐级建(与 put --dest 同款宽容)
+	var destID int64
+	if err := db.WithTx(func(tx *sql.Tx) error {
+		var err error
+		destID, err = db.EnsureFolderPath(tx, 1, segs)
+		return err
+	}); err != nil {
+		return errs.From(err)
+	}
+	var ids []int64
+	for _, t := range targets {
+		f, err := resolveTarget(db, t)
+		if err != nil {
+			return err
+		}
+		if f.DeletedAt.Valid {
+			return errs.New(errs.BadConfig, t+" 已删除,不可移动")
+		}
+		ids = append(ids, f.ID)
+	}
+	if err := db.MoveFiles(ids, destID); err != nil {
+		return errs.From(err)
+	}
+	// 重名消解可能改了文件名,重取行打印实际落点
+	for _, id := range ids {
+		f, err := db.GetFile(id)
+		if err != nil {
+			return errs.From(err)
+		}
+		fmt.Printf("已移动 → %s\n", filePathOf(db, f))
 	}
 	return nil
 }

@@ -356,8 +356,9 @@ func TestThumbnailNoteUserMeta(t *testing.T) {
 func TestFilePackColumn(t *testing.T) {
 	db := newTestDB(t)
 	var ver int
-	if err := db.QueryRow("PRAGMA user_version").Scan(&ver); err != nil || ver != 2 {
-		t.Fatalf("user_version = %d(期望 2): %v", ver, err)
+	// 版本号随迁移追加水涨船高:v2 验证 pack 列存在,v3 起还有目录元数据
+	if err := db.QueryRow("PRAGMA user_version").Scan(&ver); err != nil || ver != len(migrations) {
+		t.Fatalf("user_version = %d(期望 %d): %v", ver, len(migrations), err)
 	}
 	var id int64
 	err := db.WithTx(func(tx *sql.Tx) error {

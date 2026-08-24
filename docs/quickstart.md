@@ -63,8 +63,8 @@ export KIST_PASS='我的加密口令'   # 设了它就不用每次 --pass-stdin
 kistctl put ~/照片 --dest /2026          # 加密上传文件夹(按叶子目录打包,见下节)
 kistctl put 报告.pdf --dest /工作
 kistctl put 大视频.mp4 --dest /视频 --defer   # 弱网大文件:只加密+记账不立即上传(见下节)
-kistctl ls /2026                          # 列目录(待上传文件带「待上传」标记)
-kistctl search 照片                        # 搜文件名与备注
+kistctl ls /2026                          # 列目录(目录行附子树摘要,见下下节)
+kistctl search 照片                        # 搜文件名、备注、目录名与目录 tag
 kistctl info 5                            # 查明细:加密/上传时间、SHA、备注、缩略图
 kistctl note 5 --set "海边旅行"            # 写备注(可被搜索)
 kistctl get 5 --to ~/Downloads            # 下载自动解密(校验不过不会落盘)
@@ -95,6 +95,31 @@ kistctl backup                            # 把索引加密备份到网盘(重�
 边界:文件名必须合法 UTF-8;symlink/FIFO 等特殊文件不支持——遇到会
 **整次 put 拒绝**并列出全部问题路径(先用 `convmv -f <编码> -t utf8 -r
 --notest` 转码、清理特殊文件后再传),不会静默跳过丢数据。
+
+## 作品级元数据与浏览(meta / mv)
+
+浏览的决策单元是**作品**,不是话:`ls` 的目录行自带子树摘要,
+作者/tag/封面挂在目录上,归属传错了有便宜的纠错通道。
+
+```bash
+kistctl ls /漫画                          # 目录行附子树摘要:
+                                          #   D 作品A/  12 话 · 8.2GB · ← 08-01,待传 2
+kistctl meta set /漫画/作品A --tag "科幻,已完结" --note "作者:某人"
+kistctl meta set /漫画/作品A --cover 7    # 封面指向一个已上传的文件 id
+                                          # (惯例:put cover.jpg 后引用之;传 0 清除)
+kistctl meta set /漫画/作品A              # 不带 flag = 查看当前元数据
+kistctl meta list                         # 列出全部带元数据的目录
+kistctl search 科幻                        # 目录名 / 目录 tag / 目录备注都能搜到作品
+
+kistctl mv 5 /漫画/作品B                  # 纯索引移动:改挂点不改远端,
+                                          # 零流量零重传(重名自动 " (1)" 消解)
+```
+
+- 摘要是纯查询,任何增删之后即时反映;`PackCount>0` 显示"N 话",
+  否则"N 个文件"——相册/专辑同一措辞逻辑
+- 封面三级回退:自定义封面 → 子条目名称序前四个拼 2×2 宫格(位置即信息,
+  空位留白)→ 空作品由 GUI 渲染端按目录名稳定挑占位图;引用悬空自动回退
+- 元数据随 `backup`/`pull` 走索引云备份,多设备一致
 
 ## 弱网 / 大文件:出站箱(put --defer)
 

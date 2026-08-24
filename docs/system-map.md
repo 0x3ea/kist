@@ -41,7 +41,7 @@ cmd/kistctl(CLI 壳,1147 行)        main.go+app.go(Wails GUI 壳,Phase 6 模板
 | 包 | 行数 | 职责 | 关键文件/入口 |
 |---|---|---|---|
 | transfer | 1780 | 管线全部行为:并发调度、进度、取消、临时文件、文件夹打包(TODO-15)、出站箱、gc、缩略图 | `manager.go`(调度)、`upload.go`/`download.go`(旅程)、`pack.go`(粒度/zip/解压)、`push.go`(出站箱)、`gc.go`、`thumb.go` |
-| index | 942 | SQLite 明文索引:虚拟目录、文件账本、blob 登记、revision、快照/替换 | `db.go`(打开/WithTx/快照替换)、`schema.go`(迁移)、`files.go`、`folders.go`、`blobs.go`、`outbox.go` |
+| index | 1543 | SQLite 明文索引:虚拟目录、文件账本、目录元数据/tag(TODO-16)、子树聚合、blob 登记、revision、快照/替换 | `db.go`(打开/WithTx/快照替换)、`schema.go`(迁移)、`files.go`、`folders.go`、`summary.go`(聚合+封面三级链)、`blobs.go`、`outbox.go` |
 | crypto | 754 | 加密核心:口令→MK 包装(keyfile)、流式分块加解密(blob)、v2 大小量化 | `blob.go`(Writer/Reader)、`keyfile.go`、`format.go`(常量与档位)、`keys.go`(HKDF) |
 | dav | 542 | WebDAV 语义 + 网络可靠性:定长 PUT、流式 GET、O(1) Probe、重试退避 | `client.go`、`retry.go` |
 | backup | 209 | 索引云备份与多设备恢复,LWW | `backup.go` |
@@ -50,10 +50,10 @@ cmd/kistctl(CLI 壳,1147 行)        main.go+app.go(Wails GUI 壳,Phase 6 模板
 | config | 112 | KIST_HOME 路径、config.json、设置归一化 | `config.go` |
 | errs | 64 | AppError 错误码(CLI/GUI 共用文案映射) | `errs.go` |
 | logging | 58 | slog → KIST_HOME/kist.log,启动轮转留一代 | `logging.go` |
-| cmd/kistctl | 1147 | CLI 壳:16 个子命令、口令获取、参数重排、虚拟路径 | `main.go` |
+| cmd/kistctl | 1440 | CLI 壳:18 个子命令、口令获取、参数重排、虚拟路径 | `main.go` |
 | 根 main/app | 63 | Wails GUI 壳:Phase 6 合入的 vue-ts 模板(绑定/四页面待 Phase 7) | `main.go`、`app.go`、`frontend/` |
 
-核心代码约 6.0k 行(不含测试,另含 GUI 壳模板 63 行),全仓 Go 约 9.4k 行。**transfer + index + crypto + dav 四个包占核心的 85%**,掌控它们即掌控项目。
+核心代码约 6.8k 行(不含测试,另含 GUI 壳模板 63 行),全仓 Go 约 10.9k 行。**transfer + index + crypto + dav 四个包占核心的 85%**,掌控它们即掌控项目。
 
 ## 3. put 的字节旅程(上传端到端)
 
@@ -119,6 +119,8 @@ cmd/kistctl(CLI 壳,1147 行)        main.go+app.go(Wails GUI 壳,Phase 6 模板
 
 **files.pack**(TODO-15,schema v2):目录打包条目标记——明文区是一个标准 zip(Store),get 还原成文件夹;其 size 为量化后显示值。
 
+**目录元数据**(TODO-16,schema v3):`folders.note/user_meta/cover_file_id` 与 `tags`/`folder_tags` 两表。tag 走独立表(过滤是 tag 的全部意义);`cover_file_id` 指向普通文件,复用全部文件管线,不发明封面 blob 类别。**元数据三不原则**:不继承、不合并、无告警——聚合面(`FolderSummary`)只聚合计数,永不聚合元数据。`FolderSummary` 纯查询零维护:全量内存建树(不用递归 CTE)后序聚合 PackCount/FileCount/TotalSize/LatestAt/PendingCount,封面三级回退链同一次遍历解析(自定义单图 → 子条目名称序前四的 2×2 宫格、空位记 0 不跳过 → 空作品交渲染端)。
+
 **blobs.state**(gc 账本,只登记文件 blob;keyfile/index.enc 不入账):`active` → `trash`(rm 时标记)→ 物理删除(gc 确认远端存在后);`pending` 为出站箱挂账。`orphan` 不是落库状态,是 gc 的报告概念(远端有、索引无)。
 
 **Transfer.Phase**(一次传输的生命周期):`queued → encrypting → uploading → done`;下载 `queued → downloading → decrypting → done`;出站箱分支终态 `deferred`;异常 `error | canceled`。
@@ -147,6 +149,8 @@ cmd/kistctl(CLI 壳,1147 行)        main.go+app.go(Wails GUI 壳,Phase 6 模板
 13. 迁移 `Failed>0` 时禁止 `--switch`。
 14. 远端对象名与文件名无关:并发上传不撞名,重名消解只在索引事务内发生。
 15. pack 条目(TODO-15)明文区恰为一个标准 zip;上传校验遍**整次拒绝**坏树(非 UTF-8 名/特殊文件)不留半套索引;解压侧断言(UTF-8/不逃逸)+ 临时目录整体 rename,失败不落半个目录。
+16. 目录元数据(TODO-16)**不继承、不合并、无告警**:tag/作者/note 是目录自身属性,聚合面永不聚合元数据;写在哪个目录就属于哪个目录,kist 不做解释(哑远端约束同款)。
+17. mv 是纯索引操作:改挂点+重名消解单事务,**远端对象零变化**;修改 modified_at 不属于移动(最近更新保持内容语义)。
 
 ## 9. 失败模式与恢复路径
 
@@ -174,7 +178,7 @@ cmd/kistctl(CLI 壳,1147 行)        main.go+app.go(Wails GUI 壳,Phase 6 模板
 
 **gc**:blobs 表 trash 且远端确认存在 → 删;远端有、索引无 → 孤儿,**只报告不删**(可能是另一设备索引回退所致,删除权在用户)。
 
-## 11. CLI 命令速查(16 个子命令)
+## 11. CLI 命令速查(18 个子命令)
 
 | 命令 | 语义 | 需要口令 | 关键路径 |
 |---|---|---|---|
@@ -183,7 +187,9 @@ cmd/kistctl(CLI 壳,1147 行)        main.go+app.go(Wails GUI 壳,Phase 6 模板
 | unlock | 校验口令 | ✓ | `cmdUnlock` |
 | put [--dest] [--defer] [--expand] | 加密上传(文件夹默认打包)/ 入出站箱 / 逐文件展开 | ✓ | `Manager.UploadPaths/DeferPaths` |
 | outbox list/push/verify/discard | 出站箱搬运与收账 | ✗(纯密文) | `push.go` |
-| ls / search / info / note | 索引浏览与备注(ls 对 pack 条目显示 `P 名/`) | ✗ | `index` 各查询 |
+| ls / search / info / note | 索引浏览与备注(ls 目录行附子树摘要;search 兼查目录名/tag) | ✗ | `index` 各查询 |
+| meta set/list | 目录元数据:tag/note/封面引用(TODO-16) | ✗ | `UpdateFolderMeta`/`GetFolderMeta` |
+| mv | 纯索引移动文件(改挂点,零远端流量;重名自动消解) | ✗ | `MoveFiles` |
 | get [--keep-zip] | 下载解密;pack 还原成目录(或落 zip) | ✓ | `Manager.DownloadTo` |
 | rm | 软删 + blob 标 trash | ✗ | `SoftDeleteFiles`+`MarkBlobTrash` |
 | gc [--dry-run] | 清 trash、报孤儿 | ✗ | `RunGC` |
@@ -192,16 +198,16 @@ cmd/kistctl(CLI 壳,1147 行)        main.go+app.go(Wails GUI 壳,Phase 6 模板
 
 注意:两个密码别混——WebDAV 账户密码 vs kist 加密口令(`KIST_PASS` 或 `--pass-stdin`)。`rm` 目前只删文件;目录软删 API(`SoftDeleteFolders`)已有、CLI 无入口(GUI 用)。
 
-## 12. 测试地图(77 项,验收必跑 `go test ./... -race`)
+## 12. 测试地图(89 项,验收必跑 `go test ./... -race`)
 
 | 包 | 数量 | 覆盖要点 |
 |---|---|---|
 | crypto | 16 | keyfile 往返/错口令/参数篡改/改口令;blob 往返/篡改/截断/重排/追加/final 冒充/错密钥/v2 填充完整性/流式内存峰值 |
-| dav | 10 | MKCOL 幂等、PUT 定长、503/429 退避、4xx 不重试、ctx 取消、Probe 精确请求与网络错误区分 |
-| index | 14 | 目录树、软删可见性、搜索、revision 并发单调、快照/替换往返、重名消解、pack 列往返 |
+| dav | 13 | MKCOL 幂等、PUT 定长、503/429 退避、4xx 不重试、ctx 取消、Probe 精确请求与网络错误区分 |
+| index | 21 | 目录树、软删可见性、搜索、revision 并发单调、快照/替换往返、重名消解、pack 列往返;TODO-16:元数据往返/死 tag 清理、目录检索三路命中+软删祖先、子树聚合、封面三级回退(悬空/混合序/截断/留白)、纯索引移动+回滚、元数据经快照存活 |
 | backup | 6 | 双设备往返、错密钥、无备份、损坏备份、uploading 状态随备份同步 |
 | transfer | 10 | 临时目录清理留痕;打包粒度五形态、校验整次拒绝、zip 往返(空文件/空目录/unicode/mtime)、取消、zip-slip、非 UTF-8 条目 |
 | logging | 2 | 轮转阈值 |
-| e2e | 19 | 全生命周期(--expand 逐文件路径)、重名、取消、错密钥、孤儿留痕;出站箱 6 例(verify 大小不符/push 两档政策/discard);迁移 4 例(断点续跑/无 keyfile/无 index.enc);pack 2 例(多话对象数=叶数/还原 SHA/keep-zip、单话直挂) |
+| e2e | 21 | 全生命周期(--expand 逐文件路径)、重名、取消、错密钥、孤儿留痕;出站箱 6 例(verify 大小不符/push 两档政策/discard);迁移 4 例(断点续跑/无 keyfile/无 index.enc);pack 2 例(多话对象数=叶数/还原 SHA/keep-zip、单话直挂);TODO-16 两例(真实缩略图管线下的 meta/mv/摘要/备份恢复/封面回退) |
 
 e2e 起本地内存 WebDAV(x/net/webdav)跑真实 Manager——**transfer 的行为正确性实际由这 19 项 e2e 担保**,改管线后必跑 `go test ./internal/e2e/ -timeout 600s`。

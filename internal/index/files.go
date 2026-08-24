@@ -124,6 +124,150 @@ func (db *DB) Search(q string, limit int) ([]FileHit, error) {
 	return hits, rows.Err()
 }
 
+// ---- 目录检索与移动(TODO-16)----
+
+// FolderHit 是目录搜索/列表结果。Search 只查文件的时代,目录名不在检索面——
+// 按作品名找,除非文件名恰好含作品名,否则搜不到(FolderHit 补上这一面)。
+type FolderHit struct {
+	ID          int64
+	Name        string
+	Path        string // 完整虚拟路径
+	Note        string
+	Tags        []string
+	CoverFileID int64 // 自定义封面,0 = 未指定
+}
+
+// SearchFolders 在目录名、目录 note 与 tag 名中做子串匹配(与 Search 同风格:
+// ASCII 不区分大小写,LIKE 通配符转义为字面量)。祖先已软删的目录不计入。
+func (db *DB) SearchFolders(q string, limit int) ([]FolderHit, error) {
+	if limit <= 0 {
+		limit = 50
+	}
+	like := "%" + escapeLike(q) + "%"
+	rows, err := db.Query(`
+		SELECT id, name, COALESCE(note, ''), COALESCE(cover_file_id, 0)
+		FROM folders
+		WHERE deleted_at IS NULL
+		  AND id != ? -- 根目录名为空串,不参与检索
+		  AND (name LIKE ? ESCAPE '\'
+		       OR COALESCE(note, '') LIKE ? ESCAPE '\'
+		       OR EXISTS (SELECT 1 FROM folder_tags ft JOIN tags t ON t.id = ft.tag_id
+		                  WHERE ft.folder_id = folders.id AND t.name LIKE ? ESCAPE '\'))
+		ORDER BY name
+		LIMIT ?`, rootFolderID, like, like, like, limit)
+	if err != nil {
+		return nil, err
+	}
+	hits, err := db.scanFolderHits(rows)
+	if err != nil {
+		return nil, err
+	}
+	return hits, nil
+}
+
+// ListFoldersWithMeta 列出带任一元数据(note/tag/封面引用)的活跃目录,meta list 用。
+func (db *DB) ListFoldersWithMeta() ([]FolderHit, error) {
+	rows, err := db.Query(`
+		SELECT id, name, COALESCE(note, ''), COALESCE(cover_file_id, 0)
+		FROM folders
+		WHERE deleted_at IS NULL
+		  AND id != ?
+		  AND (COALESCE(note, '') != ''
+		       OR COALESCE(cover_file_id, 0) != 0
+		       OR EXISTS (SELECT 1 FROM folder_tags ft WHERE ft.folder_id = folders.id))
+		ORDER BY name`, rootFolderID)
+	if err != nil {
+		return nil, err
+	}
+	return db.scanFolderHits(rows)
+}
+
+// scanFolderHits 消费目录行集:拼虚拟路径过滤软删祖先,再批量补全 tags。
+// 目录规模小,tags 一次 IN 查询比逐行 EXISTS 省事。
+func (db *DB) scanFolderHits(rows *sql.Rows) ([]FolderHit, error) {
+	folders, err := db.loadFolderInfos()
+	if err != nil {
+		rows.Close()
+		return nil, err
+	}
+	hits := []FolderHit{}
+	var ids []int64
+	for rows.Next() {
+		var h FolderHit
+		if err := rows.Scan(&h.ID, &h.Name, &h.Note, &h.CoverFileID); err != nil {
+			rows.Close()
+			return nil, err
+		}
+		dir, ok := virtualPath(folders, h.ID)
+		if !ok {
+			continue // 祖先目录已软删,视为不可见
+		}
+		h.Path = dir
+		h.Tags = []string{}
+		hits = append(hits, h)
+		ids = append(ids, h.ID)
+	}
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		return nil, err
+	}
+	rows.Close()
+	if len(ids) == 0 {
+		return hits, nil
+	}
+	trows, err := db.Query(`
+		SELECT ft.folder_id, t.name FROM folder_tags ft JOIN tags t ON t.id = ft.tag_id
+		WHERE ft.folder_id IN (`+placeholders(len(ids))+`)
+		ORDER BY t.name`, toAny(ids)...)
+	if err != nil {
+		return nil, err
+	}
+	defer trows.Close()
+	byID := map[int64][]string{}
+	for trows.Next() {
+		var fid int64
+		var name string
+		if err := trows.Scan(&fid, &name); err != nil {
+			return nil, err
+		}
+		byID[fid] = append(byID[fid], name)
+	}
+	if err := trows.Err(); err != nil {
+		return nil, err
+	}
+	for i := range hits {
+		hits[i].Tags = byID[hits[i].ID]
+	}
+	return hits, nil
+}
+
+// MoveFiles 把文件移动到目标目录(纯索引操作,零远端流量):
+// blob 名与虚拟路径无关,改挂点即可;重名经 UniqueFileName 消解。
+// modified_at 不动——移动不是内容变更,"最近更新"保持内容语义。
+func (db *DB) MoveFiles(ids []int64, destFolderID int64) error {
+	if len(ids) == 0 {
+		return nil
+	}
+	return db.WithTx(func(tx *sql.Tx) error {
+		for _, id := range ids {
+			var name string
+			if err := tx.QueryRow(
+				`SELECT name FROM files WHERE id = ? AND deleted_at IS NULL`, id).Scan(&name); err != nil {
+				return fmt.Errorf("index: 文件 %d: %w", id, err)
+			}
+			newName, err := db.UniqueFileName(tx, destFolderID, name)
+			if err != nil {
+				return err
+			}
+			if _, err := tx.Exec(
+				`UPDATE files SET folder_id = ?, name = ? WHERE id = ?`, destFolderID, newName, id); err != nil {
+				return err
+			}
+		}
+		return nil
+	})
+}
+
 // SetNote 设置/清空备注;经 WithTx,改动会计入 revision 并触发后续备份。
 func (db *DB) SetNote(id int64, note string) error {
 	return db.WithTx(func(tx *sql.Tx) error {

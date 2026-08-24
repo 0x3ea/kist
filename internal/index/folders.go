@@ -3,6 +3,7 @@ package index
 import (
 	"database/sql"
 	"fmt"
+	"strings"
 )
 
 // Entry 是目录列表里的一项(目录或文件)。
@@ -161,5 +162,108 @@ func (db *DB) SoftDeleteFolders(ids []int64) error {
 			`UPDATE folders SET deleted_at = ? WHERE id IN (`+placeholders(len(ids))+`) AND deleted_at IS NULL`,
 			append([]any{now()}, toAny(ids)...)...)
 		return err
+	})
+}
+
+// ---- 目录元数据(TODO-16)----
+
+// FolderMeta 是目录的用户元数据:缺席不降级,只影响检索与展示。
+// 元数据三不原则:不继承、不合并、无告警——父子各自持有、互不感知。
+type FolderMeta struct {
+	Note        string   // 备注,参与搜索
+	UserMeta    string   // 用户自定义 JSON(扩展位,本层只存取)
+	CoverFileID int64    // 自定义封面指向的 files.id;0 = 未指定(走派生/默认级)
+	Tags        []string // 无序去重;空切片 = 无 tag
+}
+
+// FolderMetaUpdate 是元数据的增量写请求:指针为 nil 表示该项不动,
+// 指向零值表示清除——一个事务内原子生效,全部成功才计一次 revision。
+type FolderMetaUpdate struct {
+	Note  *string
+	Cover *int64
+	Tags  []string // 非 nil 即全量覆盖(nil = 不动,空切片 = 清空)
+}
+
+// GetFolderMeta 读目录元数据;目录不存在或已软删时报错。
+func (db *DB) GetFolderMeta(folderID int64) (FolderMeta, error) {
+	var m FolderMeta
+	var note, userMeta sql.NullString
+	var cover sql.NullInt64
+	err := db.QueryRow(
+		`SELECT note, user_meta, cover_file_id FROM folders WHERE id = ? AND deleted_at IS NULL`,
+		folderID).Scan(&note, &userMeta, &cover)
+	if err != nil {
+		return m, fmt.Errorf("index: 目录 %d 不存在: %w", folderID, err)
+	}
+	m.Note, m.UserMeta = note.String, userMeta.String
+	m.CoverFileID = cover.Int64
+
+	rows, err := db.Query(
+		`SELECT t.name FROM folder_tags ft JOIN tags t ON t.id = ft.tag_id
+		 WHERE ft.folder_id = ? ORDER BY t.name`, folderID)
+	if err != nil {
+		return m, err
+	}
+	defer rows.Close()
+	m.Tags = []string{}
+	for rows.Next() {
+		var name string
+		if err := rows.Scan(&name); err != nil {
+			return m, err
+		}
+		m.Tags = append(m.Tags, name)
+	}
+	return m, rows.Err()
+}
+
+// UpdateFolderMeta 原子更新元数据。tag 写入走"全量覆盖":
+// 删旧关联、插新关联,再把无任何目录引用的死 tag 行清掉——
+// tags 表只承载有效词,搜索面与 meta list 不被残留污染。
+func (db *DB) UpdateFolderMeta(folderID int64, u FolderMetaUpdate) error {
+	return db.WithTx(func(tx *sql.Tx) error {
+		var n int
+		if err := tx.QueryRow(
+			`SELECT 1 FROM folders WHERE id = ? AND deleted_at IS NULL`, folderID).Scan(&n); err != nil {
+			return fmt.Errorf("index: 目录 %d 不存在: %w", folderID, err)
+		}
+		if u.Note != nil {
+			if _, err := tx.Exec(`UPDATE folders SET note = ? WHERE id = ?`, *u.Note, folderID); err != nil {
+				return err
+			}
+		}
+		if u.Cover != nil {
+			if _, err := tx.Exec(
+				`UPDATE folders SET cover_file_id = ? WHERE id = ?`, *u.Cover, folderID); err != nil {
+				return err
+			}
+		}
+		if u.Tags != nil {
+			if _, err := tx.Exec(`DELETE FROM folder_tags WHERE folder_id = ?`, folderID); err != nil {
+				return err
+			}
+			seen := map[string]bool{}
+			for _, name := range u.Tags {
+				name = strings.TrimSpace(name)
+				if name == "" || seen[name] {
+					continue
+				}
+				seen[name] = true
+				if _, err := tx.Exec(
+					`INSERT INTO tags (name) VALUES (?) ON CONFLICT(name) DO NOTHING`, name); err != nil {
+					return err
+				}
+				if _, err := tx.Exec(
+					`INSERT OR IGNORE INTO folder_tags (folder_id, tag_id)
+					 SELECT ?, id FROM tags WHERE name = ?`, folderID, name); err != nil {
+					return err
+				}
+			}
+			// 清死 tag:没有任何目录再引用的词不值得保留
+			if _, err := tx.Exec(
+				`DELETE FROM tags WHERE id NOT IN (SELECT DISTINCT tag_id FROM folder_tags)`); err != nil {
+				return err
+			}
+		}
+		return nil
 	})
 }
