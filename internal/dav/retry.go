@@ -19,6 +19,10 @@ type Retrier struct {
 	Sleep func(ctx context.Context, d time.Duration) error
 }
 
+// NewRetrier 构造默认重试器。参数刻意写死、不进用户配置:退避是实现策略
+// 而非用户意图,适应性由 Retry-After 优先与 ctx 取消提供;默认值有
+// provider-notes 的实测依据(保守网盘限速脾性)。若未来参数暴露进
+// config.json(外部输入),应改为构造期校验并返回 error,而非本包的 panic。
 func NewRetrier() *Retrier {
 	return &Retrier{Max: 5, Base: time.Second, Cap: 30 * time.Second}
 }
@@ -27,7 +31,7 @@ func NewRetrier() *Retrier {
 // 每次尝试与每次睡眠前都检查 ctx;错误携带 Retry-After 时取 max(Retry-After, 退避)。
 // 幂等性由调用方保证:PUT 目标是全新随机名、GET 天然幂等、MKCOL 忽略"已存在"。
 func (r *Retrier) Do(ctx context.Context, op func() error) error {
-	maxN, base, top := r.norm()
+	maxN, base, top := r.check()
 	delay := base
 	var lastErr error
 	for attempt := 0; attempt < maxN; attempt++ {
@@ -65,20 +69,20 @@ func (r *Retrier) Do(ctx context.Context, op func() error) error {
 	return fmt.Errorf("dav: 重试 %d 次后仍失败: %w", maxN, lastErr)
 }
 
-func (r *Retrier) norm() (maxN int, base, top time.Duration) {
-	maxN = r.Max
-	if maxN < 1 {
-		maxN = 1
+// check 在 Do 入口校验配置并原样返回;非法即 panic。
+// 非法值只能来自包内(不来自任何外部输入),对程序错误选立即爆出而非静默修复
+// 此前的默认值回填会把笔误吞掉:
+// Max=0 悄悄变 1(重试失效但系统照跑)
+// Base=0 默认 1s(测试莫名变慢)
+// Cap<base 退避曲线塌掉
+// 放在 Do 入口而非构造器,是因为导出字段允许 &Retrier{...} 字面量部分构造与运行中改写,
+// 只有消费点能覆盖所有构造路径。零值尤其危险:Max=0 会让 op 一次都不
+// 执行,还返回 wrap 着 nil 的怪错误。
+func (r *Retrier) check() (maxN int, base, top time.Duration) {
+	if r.Max < 1 || r.Base <= 0 || r.Cap < r.Base {
+		panic(fmt.Sprintf("dav: Retrier 配置非法(Max=%d, Base=%s, Cap=%s)", r.Max, r.Base, r.Cap))
 	}
-	base = r.Base
-	if base <= 0 {
-		base = time.Second
-	}
-	top = r.Cap
-	if top < base {
-		top = base
-	}
-	return
+	return r.Max, r.Base, r.Cap
 }
 
 func (r *Retrier) sleep(ctx context.Context, d time.Duration) error {
