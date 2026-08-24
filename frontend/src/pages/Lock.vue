@@ -4,17 +4,35 @@
 //   2) 已配置且有本地 keyfile → 输口令解锁;若解锁后发现本地空库且远端有
 //      备份(UnlockResult.SuggestPullIndex),提示一键"从远端恢复"
 //   3) 已配置且无本地 keyfile → 新设备,直接"从远端恢复"(ImportFromRemote)
-import { computed, reactive, ref } from 'vue'
+import { computed, reactive, ref, watch } from 'vue'
 import { main } from '../../wailsjs/go/models'
 import { store, createAccount, importFromRemote, saveWebDAVConfig, testConnection, unlock } from '../store'
 
 const state = store.state
 
 // ---- 分支判定 ----
-const mode = computed<'wizard' | 'unlock' | 'recover'>(() => {
+// autoMode 按状态推导;manualMode 是显式覆盖,解决向导粘性:向导第一步保存
+// 配置后 Configured 翻 true 而本地 keyfile 要等第二步建户,autoMode 会立即
+// 算成 recover,把"设口令"顶掉——所以一旦因"未配置"进入向导就粘住,直到
+// 建户成功;两分支底部互设切换链接作为出口(新设备也可能想反向去建户)。
+type Mode = 'wizard' | 'unlock' | 'recover'
+const manualMode = ref<Mode | null>(null)
+
+const autoMode = computed<Mode>(() => {
   if (!state.Configured) return 'wizard'
   return state.HasLocalKeyfile ? 'unlock' : 'recover'
 })
+
+// 启动即未配置(或状态刷新发现未配置)且用户未显式选过 → 进入并粘住向导
+watch(
+  autoMode,
+  (m) => {
+    if (m === 'wizard' && manualMode.value === null) manualMode.value = 'wizard'
+  },
+  { immediate: true },
+)
+
+const mode = computed<Mode>(() => manualMode.value ?? autoMode.value)
 
 // ---- 向导:第一步 WebDAV,第二步口令 ----
 const step = ref<'webdav' | 'passphrase'>('webdav')
@@ -115,6 +133,7 @@ async function onRecover() {
           <p v-if="testMsg" class="msg err">{{ testMsg }}</p>
           <button class="primary" @click="onCreate">建立账户</button>
         </template>
+        <a class="switch" @click="manualMode = null">此网盘已有账户?从远端恢复</a>
       </template>
 
       <!-- ② 解锁 -->
@@ -141,6 +160,7 @@ async function onRecover() {
         <label>口令<input v-model="recoverPass" type="password" @keyup.enter="onRecover" /></label>
         <p v-if="recoverNote" class="msg err">{{ recoverNote }}</p>
         <button class="primary" :disabled="!recoverPass" @click="onRecover">恢复</button>
+        <a class="switch" @click="manualMode = 'wizard'">想在此网盘新建账户?返回向导</a>
       </template>
     </div>
   </div>
@@ -229,5 +249,16 @@ label.check input {
   flex-direction: column;
   gap: 8px;
   align-items: flex-start;
+}
+
+.switch {
+  color: var(--dim);
+  font-size: 12px;
+  cursor: pointer;
+  text-align: center;
+}
+
+.switch:hover {
+  color: var(--accent);
 }
 </style>
