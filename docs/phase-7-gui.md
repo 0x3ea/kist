@@ -106,6 +106,7 @@ App 持有 ctx、cfg、db、dav client、remote.Store、transfer.Manager、MK(�
 
 - **`index.UpdateFolderMeta` cover 清除的 FK 违例**:`cover_file_id` 带 `REFERENCES files(id)`,清除(0)直写会触发外键失败(CLI `meta set --cover 0` 同样踩雷)——修正为 0 → NULL。GUI 绑定层测试发现。
 - **transfer worker 的 `deps.Remote` data race 隐患**:与 SetRemote 并发替换无同步,改为 worker 持 `remoteSnapshot()` 锁下快照。
+- **`OnBeforeClose` 返回值语义写反(GUI 壳自身 bug,冒烟次日修)**:Wails v2 签名是 `func(ctx) (prevent bool)`——true = **阻止**关闭;曾按"true=允许关"实现,导致无传输时恒 prevent → SIGTERM 与点 X 都关不掉窗口、主线程永挂 `gtk_main`(goroutine dump 定位:无任何 goroutine 推进退出流程),OnShutdown 链路(退出前备份)也从未执行过。修正:无传输返回 false 放行;有传输弹确认,Yes(确认中止)放行、其余阻止。修复后 SIGTERM 3 秒内退出。教训:**框架回调的 bool 语义必须看签名命名**(prevent)而不是望文生义。
 
 ## 验收标准
 
