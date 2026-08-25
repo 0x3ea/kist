@@ -128,6 +128,7 @@ export namespace index {
 	    Name: string;
 	    Path: string;
 	    Note: string;
+	    Tags: string[];
 	    Size: number;
 	    ModifiedAt: number;
 	
@@ -141,8 +142,37 @@ export namespace index {
 	        this.Name = source["Name"];
 	        this.Path = source["Path"];
 	        this.Note = source["Note"];
+	        this.Tags = source["Tags"];
 	        this.Size = source["Size"];
 	        this.ModifiedAt = source["ModifiedAt"];
+	    }
+	}
+	export class FileMeta {
+	    Note: string;
+	    Tags: string[];
+	
+	    static createFrom(source: any = {}) {
+	        return new FileMeta(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.Note = source["Note"];
+	        this.Tags = source["Tags"];
+	    }
+	}
+	export class FileMetaUpdate {
+	    Note?: string;
+	    Tags: string[];
+	
+	    static createFrom(source: any = {}) {
+	        return new FileMetaUpdate(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.Note = source["Note"];
+	        this.Tags = source["Tags"];
 	    }
 	}
 	export class FolderHit {
@@ -263,6 +293,7 @@ export namespace main {
 	    EncryptedAt?: number;
 	    UploadedAt?: number;
 	    Note: string;
+	    Tags: string[];
 	    HasThumb: boolean;
 	
 	    static createFrom(source: any = {}) {
@@ -287,6 +318,7 @@ export namespace main {
 	        this.EncryptedAt = source["EncryptedAt"];
 	        this.UploadedAt = source["UploadedAt"];
 	        this.Note = source["Note"];
+	        this.Tags = source["Tags"];
 	        this.HasThumb = source["HasThumb"];
 	    }
 	}

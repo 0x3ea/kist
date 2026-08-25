@@ -366,6 +366,58 @@ export async function saveFolderMeta(folderID: number, u: index.FolderMetaUpdate
   }
 }
 
+// ---- 文件元数据(TODO-17):tag 挂文件 + 手动封面 ----
+
+export async function getFileMeta(fileID: number): Promise<index.FileMeta | null> {
+  try {
+    return await API.GetFileMeta(fileID)
+  } catch (e) {
+    fail(e)
+    return null
+  }
+}
+
+export async function saveFileMeta(fileID: number, u: index.FileMetaUpdate): Promise<boolean> {
+  try {
+    await API.UpdateFileMeta(fileID, u)
+    toast('info', '文件元数据已保存')
+    return true
+  } catch (e) {
+    fail(e)
+    return false
+  }
+}
+
+/** 选一张本地图片(GUI 封面导入);取消返回空串 */
+export async function pickImageFile(): Promise<string> {
+  try {
+    return await API.PickImageFile()
+  } catch (e) {
+    fail(e)
+    return ''
+  }
+}
+
+/**
+ * 导入/清除文件封面(localPath 空 = 清除)。成功后失效缩略图缓存——
+ * 旧图与"无缩略图"负缓存都不可信,强制下次重取;详情面板同步 HasThumb。
+ */
+export async function setFileCover(fileID: number, localPath: string): Promise<boolean> {
+  try {
+    await API.SetFileCover(fileID, localPath)
+    store.thumbs.delete(fileID)
+    if (store.detail?.ID === fileID) {
+      store.detail.HasThumb = localPath !== ''
+      if (localPath) ensureThumb(fileID)
+    }
+    toast('info', localPath ? '封面已导入' : '封面已清除')
+    return true
+  } catch (e) {
+    fail(e)
+    return false
+  }
+}
+
 // ---- Transfers 页 ----
 
 export function goTransfers() {

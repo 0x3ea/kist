@@ -144,6 +144,8 @@ GUI 是纯壳:**零业务逻辑,只编排 internal/***。与 CLI 的关系是同
 
 **目录元数据**(TODO-16,schema v3):`folders.note/user_meta/cover_file_id` 与 `tags`/`folder_tags` 两表。tag 走独立表(过滤是 tag 的全部意义);`cover_file_id` 指向普通文件,复用全部文件管线,不发明封面 blob 类别。**元数据三不原则**:不继承、不合并、无告警——聚合面(`FolderSummary`)只聚合计数,永不聚合元数据。`FolderSummary` 纯查询零维护:全量内存建树(不用递归 CTE)后序聚合 PackCount/FileCount/TotalSize/LatestAt/PendingCount,封面三级回退链同一次遍历解析(自定义单图 → 子条目名称序前四的 2×2 宫格、空位记 0 不跳过 → 空作品交渲染端)。
 
+**文件元数据**(TODO-17,schema v4):`file_tags` 镜像 folder_tags、共享 `tags` 词表——两种作品形态同一词典,死词清理必须 UNION 双表(任一侧清空不得误删另一形态仍在用的同名词);文件封面不是引用而是**自身的 thumbnails 行**,GUI「导入封面」走上传同款 `MakeThumbnail` 管线直写(覆盖语义:pack 的自动首页缩略图被顶掉后清除不恢复;坏图报错不静默,与上传侧的"失败即跳过"相反);`Search` 文件侧补 tag 命中(EXISTS 子查询),`FileHit` 回填 Tags。
+
 **blobs.state**(gc 账本,只登记文件 blob;keyfile/index.enc 不入账):`active` → `trash`(rm 时标记)→ 物理删除(gc 确认远端存在后);`pending` 为出站箱挂账。`orphan` 不是落库状态,是 gc 的报告概念(远端有、索引无)。
 
 **Transfer.Phase**(一次传输的生命周期):`queued → encrypting → uploading → done`;下载 `queued → downloading → decrypting → done`;出站箱分支终态 `deferred`;异常 `error | canceled`。
@@ -211,7 +213,7 @@ GUI 是纯壳:**零业务逻辑,只编排 internal/***。与 CLI 的关系是同
 | put [--dest] [--defer] [--expand] | 加密上传(文件夹默认打包)/ 入出站箱 / 逐文件展开 | ✓ | `Manager.UploadPaths/DeferPaths` |
 | outbox list/push/verify/discard | 出站箱搬运与收账 | ✗(纯密文) | `push.go` |
 | ls / search / info / note | 索引浏览与备注(ls 目录行附子树摘要;search 兼查目录名/tag) | ✗ | `index` 各查询 |
-| meta set/list | 目录元数据:tag/note/封面引用(TODO-16) | ✗ | `UpdateFolderMeta`/`GetFolderMeta` |
+| meta set/list | 目录/文件元数据:tag/note/封面引用(TODO-16/17;文件目标用 uuid\|id,--cover 仅目录,文件封面导入走 GUI) | ✗ | `UpdateFolderMeta`/`UpdateFileMeta` |
 | mv | 纯索引移动文件(改挂点,零远端流量;重名自动消解) | ✗ | `MoveFiles` |
 | get [--keep-zip] | 下载解密;pack 还原成目录(或落 zip) | ✓ | `Manager.DownloadTo` |
 | rm | 软删 + blob 标 trash | ✗ | `SoftDeleteFiles`+`MarkBlobTrash` |
@@ -221,14 +223,14 @@ GUI 是纯壳:**零业务逻辑,只编排 internal/***。与 CLI 的关系是同
 
 注意:两个密码别混——WebDAV 账户密码 vs kist 加密口令(`KIST_PASS` 或 `--pass-stdin`)。`rm` 目前只删文件;目录软删 API(`SoftDeleteFolders`)已有、CLI 无入口(GUI 用)。
 
-## 12. 测试地图(97 项,验收必跑 `go test ./... -race`)
+## 12. 测试地图(103 项,验收必跑 `go test ./... -race`)
 
 | 包 | 数量 | 覆盖要点 |
 |---|---|---|
-| 根(GUI 壳) | 8 | headless 绑定层:codedError 格式、ListFolder 合成(null 归一/摘要批量)、SearchAll 三路命中、路径拆分(`..` 拒绝)、EnsureFolder 幂等+移动落点、删除(软删+trash/目录隐藏/空选拒绝)、元数据指针语义、缩略图 NOT_FOUND 与详情投影;顺带逼出 cover 清除的 FK 缺陷 |
+| 根(GUI 壳) | 9 | headless 绑定层:codedError 格式、ListFolder 合成(null 归一/摘要批量)、SearchAll 三路命中、路径拆分(`..` 拒绝)、EnsureFolder 幂等+移动落点、删除(软删+trash/目录隐藏/空选拒绝)、元数据指针语义、缩略图 NOT_FOUND 与详情投影;顺带逼出 cover 清除的 FK 缺陷;TODO-17 文件元数据+封面绑定(往返/tag 命中/导入/清除/非图片 BAD_CONFIG/已删拒绝) |
 | crypto | 16 | keyfile 往返/错口令/参数篡改/改口令;blob 往返/篡改/截断/重排/追加/final 冒充/错密钥/v2 填充完整性/流式内存峰值 |
 | dav | 13 | MKCOL 幂等、PUT 定长、503/429 退避、4xx 不重试、ctx 取消、Probe 精确请求与网络错误区分 |
-| index | 21 | 目录树、软删可见性、搜索、revision 并发单调、快照/替换往返、重名消解、pack 列往返;TODO-16:元数据往返/死 tag 清理、目录检索三路命中+软删祖先、子树聚合、封面三级回退(悬空/混合序/截断/留白)、纯索引移动+回滚、元数据经快照存活 |
+| index | 26 | 目录树、软删可见性、搜索、revision 并发单调、快照/替换往返、重名消解、pack 列往返;TODO-16:元数据往返/死 tag 清理、目录检索三路命中+软删祖先、子树聚合、封面三级回退(悬空/混合序/截断/留白)、纯索引移动+回滚、元数据经快照存活;TODO-17:文件元数据往返、双形态共享词表的双向死词清理、文件 tag 命中+Tags 回填、v3→v4 升级、文件元数据+手动封面经快照存活 |
 | backup | 6 | 双设备往返、错密钥、无备份、损坏备份、uploading 状态随备份同步 |
 | transfer | 10 | 临时目录清理留痕;打包粒度五形态、校验整次拒绝、zip 往返(空文件/空目录/unicode/mtime)、取消、zip-slip、非 UTF-8 条目 |
 | logging | 2 | 轮转阈值 |

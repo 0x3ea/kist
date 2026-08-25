@@ -48,6 +48,26 @@ func (a *App) PickDir() (dir string, err error) {
 	return dir, nil
 }
 
+// PickImageFile 打开单选图片对话框(GUI 导入文件封面,TODO-17);取消返回空串。
+// 过滤器与 MakeThumbnail 的嗅探范围一致(jpeg/png/gif/bmp/webp)。
+func (a *App) PickImageFile() (path string, err error) {
+	defer a.panicGuard(&err)
+	if a.ctx == nil {
+		return "", a.wrap(errs.New(errs.Internal, "窗口尚未就绪"))
+	}
+	path, err = wruntime.OpenFileDialog(a.ctx, wruntime.OpenDialogOptions{
+		Title: "选择封面图片",
+		Filters: []wruntime.FileFilter{
+			{DisplayName: "图片 (*.jpg;*.jpeg;*.png;*.gif;*.bmp;*.webp)",
+				Pattern: "*.jpg;*.jpeg;*.png;*.gif;*.bmp;*.webp"},
+		},
+	})
+	if err != nil {
+		return "", a.wrap(errs.New(errs.BadConfig, err.Error()))
+	}
+	return path, nil
+}
+
 // UploadPaths 异步入队上传(文件/文件夹;文件夹默认按叶子目录打包,TODO-15 行为),
 // 立即返回入队数;进度经 transfer:update 事件推送。destFolderID 0 归一化为根。
 func (a *App) UploadPaths(paths []string, destFolderID int64) (n int, err error) {

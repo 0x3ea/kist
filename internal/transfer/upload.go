@@ -139,9 +139,9 @@ func (m *Manager) runUpload(j *job) error {
 	if j.pack {
 		thumbSrc = packFirstImage
 	}
-	var thumb *thumbData
+	var thumb *ThumbData
 	if thumbSrc != "" {
-		if td, terr := makeThumbnail(thumbSrc); terr == nil {
+		if td, terr := MakeThumbnail(thumbSrc); terr == nil {
 			thumb = &td
 		} else if !errors.Is(terr, errNotImage) {
 			// 是图片却生成失败:留痕供排查(TODO-07 静默黑洞);非图片属预期,静默跳过
@@ -206,7 +206,7 @@ func (m *Manager) runUpload(j *job) error {
 			return err
 		}
 		if thumb != nil {
-			if err := m.deps.DB.PutThumbnail(tx, fileID, thumb.data, thumb.w, thumb.h, thumb.mime); err != nil {
+			if err := m.deps.DB.PutThumbnail(tx, fileID, thumb.Data, thumb.W, thumb.H, thumb.Mime); err != nil {
 				return err
 			}
 		}
@@ -231,7 +231,7 @@ func (m *Manager) runUpload(j *job) error {
 // 'pending';产物挪入 KIST_HOME/outbox——运输交给 push 或手工搬运,
 // verify 收账。产物挪动失败时索引行已提交:留着 uploading 行,由 outbox
 // list/verify 报告"产物缺失",用户可 discard 后重来,不会出现幽灵 ready。
-func (m *Manager) deferUpload(j *job, row index.FileRow, thumb *thumbData, blobPath string) error {
+func (m *Manager) deferUpload(j *job, row index.FileRow, thumb *ThumbData, blobPath string) error {
 	tr := j.tr
 	finalName := ""
 	var fileID int64
@@ -248,7 +248,7 @@ func (m *Manager) deferUpload(j *job, row index.FileRow, thumb *thumbData, blobP
 			return err
 		}
 		if thumb != nil {
-			if err := m.deps.DB.PutThumbnail(tx, fileID, thumb.data, thumb.w, thumb.h, thumb.mime); err != nil {
+			if err := m.deps.DB.PutThumbnail(tx, fileID, thumb.Data, thumb.W, thumb.H, thumb.Mime); err != nil {
 				return err
 			}
 		}

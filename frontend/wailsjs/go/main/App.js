@@ -38,6 +38,10 @@ export function GetAppState() {
   return window['go']['main']['App']['GetAppState']();
 }
 
+export function GetFileMeta(arg1) {
+  return window['go']['main']['App']['GetFileMeta'](arg1);
+}
+
 export function GetFolderMeta(arg1) {
   return window['go']['main']['App']['GetFolderMeta'](arg1);
 }
@@ -78,6 +82,10 @@ export function PickFiles() {
   return window['go']['main']['App']['PickFiles']();
 }
 
+export function PickImageFile() {
+  return window['go']['main']['App']['PickImageFile']();
+}
+
 export function PreviewGC() {
   return window['go']['main']['App']['PreviewGC']();
 }
@@ -98,6 +106,10 @@ export function SearchAll(arg1, arg2) {
   return window['go']['main']['App']['SearchAll'](arg1, arg2);
 }
 
+export function SetFileCover(arg1, arg2) {
+  return window['go']['main']['App']['SetFileCover'](arg1, arg2);
+}
+
 export function SetNote(arg1, arg2) {
   return window['go']['main']['App']['SetNote'](arg1, arg2);
 }
@@ -116,6 +128,10 @@ export function Transfers() {
 
 export function Unlock(arg1) {
   return window['go']['main']['App']['Unlock'](arg1);
+}
+
+export function UpdateFileMeta(arg1, arg2) {
+  return window['go']['main']['App']['UpdateFileMeta'](arg1, arg2);
 }
 
 export function UpdateFolderMeta(arg1, arg2) {

@@ -30,6 +30,9 @@ async function onSaveNote() {
     </div>
     <h3 :title="store.detail.Name">{{ store.detail.Name }}</h3>
     <p class="path">{{ store.detail.Path }}</p>
+    <div v-if="store.detail.Tags?.length" class="tags">
+      <span v-for="t in store.detail.Tags" :key="t" class="tag">#{{ t }}</span>
+    </div>
     <dl>
       <dt>大小</dt>
       <dd>{{ humanSize(store.detail.Size) }}(密文 {{ humanSize(store.detail.CipherSize) }})</dd>
@@ -95,6 +98,17 @@ h3 {
   color: var(--dim);
   font-size: 12px;
   word-break: break-all;
+}
+
+.tags {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+}
+
+.tag {
+  color: var(--accent);
+  font-size: 12px;
 }
 
 dl {

@@ -17,13 +17,13 @@ import FileTable from '../components/FileTable.vue'
 import CardGrid from '../components/CardGrid.vue'
 import DetailPanel from '../components/DetailPanel.vue'
 import MoveDialog from '../components/MoveDialog.vue'
-import FolderMetaDialog from '../components/FolderMetaDialog.vue'
+import MetaDialog from '../components/MetaDialog.vue'
 import { humanSize } from '../format'
 
 const query = ref('')
 const showMove = ref(false)
-const metaFolderID = ref<number | null>(null)
-const metaFolderName = ref('')
+// 元数据对话框目标:目录(TODO-16)或文件(TODO-17),恰好选中一个时可用
+const metaTarget = ref<{ mode: 'folder' | 'file'; id: number; name: string; pack: boolean } | null>(null)
 
 const selTotal = computed(() => store.selection.size + store.folderSelection.size)
 
@@ -55,10 +55,19 @@ async function onDelete() {
 }
 
 function onMeta() {
-  const id = [...store.folderSelection][0]
-  if (!id) return
-  metaFolderID.value = id
-  metaFolderName.value = store.folder.entries.find((e) => e.ID === id)?.Name ?? ''
+  const fid = [...store.folderSelection][0]
+  if (fid) {
+    metaTarget.value = {
+      mode: 'folder',
+      id: fid,
+      name: store.folder.entries.find((e) => e.ID === fid)?.Name ?? '',
+      pack: false,
+    }
+    return
+  }
+  const id = [...store.selection][0]
+  const e = store.folder.entries.find((x) => x.ID === id)
+  if (e) metaTarget.value = { mode: 'file', id, name: e.Name, pack: e.Pack }
 }
 </script>
 
@@ -78,7 +87,12 @@ function onMeta() {
       <button @click="onUpload('folder')">上传文件夹</button>
       <button :disabled="store.selection.size === 0" @click="downloadSelected">下载</button>
       <button :disabled="store.selection.size === 0" @click="showMove = true">移动</button>
-      <button :disabled="store.folderSelection.size !== 1" @click="onMeta">元数据</button>
+      <button
+        :disabled="store.folderSelection.size !== 1 && !(store.folderSelection.size === 0 && store.selection.size === 1)"
+        @click="onMeta"
+      >
+        元数据
+      </button>
       <button class="danger" :disabled="selTotal === 0" @click="onDelete">删除</button>
       <button class="view" :title="store.view === 'grid' ? '切到列表' : '切到网格'" @click="store.view = store.view === 'grid' ? 'list' : 'grid'">
         {{ store.view === 'grid' ? '☰' : '▦' }}
@@ -105,6 +119,7 @@ function onMeta() {
           <span class="dim">{{ h.Path }}</span>
           <span class="dim size">{{ humanSize(h.Size) }}</span>
           <span v-if="h.Note" class="dim note">{{ h.Note }}</span>
+          <span v-for="t in h.Tags" :key="t" class="tag">#{{ t }}</span>
         </div>
         <div v-if="store.search.folders.length === 0 && store.search.files.length === 0" class="no-hit">没有命中</div>
       </div>
@@ -130,7 +145,14 @@ function onMeta() {
     </template>
 
     <MoveDialog v-if="showMove" @close="showMove = false" />
-    <FolderMetaDialog v-if="metaFolderID !== null" :folder-i-d="metaFolderID" :name="metaFolderName" @close="((metaFolderID = null), (metaFolderName = ''))" />
+    <MetaDialog
+      v-if="metaTarget"
+      :mode="metaTarget.mode"
+      :id="metaTarget.id"
+      :name="metaTarget.name"
+      :pack="metaTarget.pack"
+      @close="metaTarget = null"
+    />
   </div>
 </template>
 

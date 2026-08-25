@@ -32,12 +32,13 @@ type FileRow struct {
 const fileColumns = `id, uuid, folder_id, name, size, cipher_size, sha256, chunk_size,
 	blob_name, state, created_at, modified_at, encrypted_at, uploaded_at, note, user_meta, pack, deleted_at`
 
-// FileHit 是搜索结果:Name 命中文件名或 Note 命中备注,Path 为完整虚拟路径。
+// FileHit 是搜索结果:Name/Note/Tag 任一命中,Path 为完整虚拟路径。
 type FileHit struct {
 	ID         int64
 	Name       string
 	Path       string
 	Note       string
+	Tags       []string
 	Size       int64
 	ModifiedAt int64
 }
@@ -83,8 +84,9 @@ func (db *DB) GetFileByUUID(uuid string) (FileRow, error) {
 	return scanFile(db.QueryRow(`SELECT `+fileColumns+` FROM files WHERE uuid = ?`, uuid))
 }
 
-// Search 在文件名与备注中做子串匹配:ASCII 不区分大小写(SQLite LIKE 默认),
-// 中文直接子串;LIKE 通配符被转义为字面量。祖先目录已软删的文件不计入。
+// Search 在文件名、备注与 tag 中做子串匹配:ASCII 不区分大小写(SQLite LIKE
+// 默认),中文直接子串;LIKE 通配符被转义为字面量。祖先目录已软删的文件不计入。
+// tag 命中走 EXISTS 子查询(ix_file_tags_tag),与 SearchFolders 的目录侧对称。
 func (db *DB) Search(q string, limit int) ([]FileHit, error) {
 	if limit <= 0 {
 		limit = 50
@@ -94,9 +96,12 @@ func (db *DB) Search(q string, limit int) ([]FileHit, error) {
 		SELECT id, name, folder_id, size, modified_at, COALESCE(note, '')
 		FROM files
 		WHERE deleted_at IS NULL
-		  AND (name LIKE ? ESCAPE '\' OR note LIKE ? ESCAPE '\')
+		  AND (name LIKE ? ESCAPE '\'
+		       OR note LIKE ? ESCAPE '\'
+		       OR EXISTS (SELECT 1 FROM file_tags ft JOIN tags t ON t.id = ft.tag_id
+		                  WHERE ft.file_id = files.id AND t.name LIKE ? ESCAPE '\'))
 		ORDER BY name
-		LIMIT ?`, like, like, limit)
+		LIMIT ?`, like, like, like, limit)
 	if err != nil {
 		return nil, err
 	}
@@ -119,9 +124,45 @@ func (db *DB) Search(q string, limit int) ([]FileHit, error) {
 		}
 		// path.Join 顺带规整拼接:根目录 dir 为 "/" 时不会产生 "//" 前缀
 		h.Path = path.Join(dir, h.Name)
+		h.Tags = []string{}
 		hits = append(hits, h)
 	}
-	return hits, rows.Err()
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return hits, attachFileTags(db, hits)
+}
+
+// attachFileTags 一次批量查询回填命中文件的 tag(GUI 搜索结果展示用,
+// 与 FolderHit.Tags 对称)。查询失败不致命:命中本身已成立,tag 只是补充。
+func attachFileTags(db *DB, hits []FileHit) error {
+	if len(hits) == 0 {
+		return nil
+	}
+	ids := make([]any, len(hits))
+	byID := make(map[int64]*FileHit, len(hits))
+	for i := range hits {
+		ids[i] = hits[i].ID
+		byID[hits[i].ID] = &hits[i]
+	}
+	rows, err := db.Query(
+		`SELECT ft.file_id, t.name FROM file_tags ft JOIN tags t ON t.id = ft.tag_id
+		 WHERE ft.file_id IN (`+placeholders(len(hits))+`) ORDER BY t.name`, ids...)
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var id int64
+		var name string
+		if err := rows.Scan(&id, &name); err != nil {
+			return err
+		}
+		if h := byID[id]; h != nil {
+			h.Tags = append(h.Tags, name)
+		}
+	}
+	return rows.Err()
 }
 
 // ---- 目录检索与移动(TODO-16)----
@@ -281,6 +322,100 @@ func (db *DB) SetUserMeta(id int64, metaJSON string) error {
 	return db.WithTx(func(tx *sql.Tx) error {
 		_, err := tx.Exec(`UPDATE files SET user_meta = ? WHERE id = ?`, metaJSON, id)
 		return err
+	})
+}
+
+// ---- 文件元数据(TODO-17):note 已有,这里补 tag 的读写 ----
+
+// FileMeta 是文件的用户元数据投影:文件封面不走这里——封面就是文件自己的
+// 缩略图行(thumbnails),由传输管线上传时生成或 GUI 显式导入,与目录的
+// cover_file_id 引用式不同(目录自身没有字节,文件直接持有)。
+type FileMeta struct {
+	Note string   // 备注,参与搜索
+	Tags []string // 无序去重;空切片 = 无 tag
+}
+
+// FileMetaUpdate 是文件元数据的增量写请求,指针语义与 FolderMetaUpdate 一致:
+// nil = 不动,指向零值 = 清除——一个事务内原子生效,经 WithTx 计一次 revision。
+type FileMetaUpdate struct {
+	Note *string
+	Tags []string // 非 nil 即全量覆盖(nil = 不动,空切片 = 清空)
+}
+
+// GetFileMeta 读文件元数据;文件不存在或已软删时报错。
+func (db *DB) GetFileMeta(fileID int64) (FileMeta, error) {
+	var m FileMeta
+	var note sql.NullString
+	err := db.QueryRow(
+		`SELECT note FROM files WHERE id = ? AND deleted_at IS NULL`, fileID).Scan(&note)
+	if err != nil {
+		return m, fmt.Errorf("index: 文件 %d 不存在: %w", fileID, err)
+	}
+	m.Note = note.String
+
+	rows, err := db.Query(
+		`SELECT t.name FROM file_tags ft JOIN tags t ON t.id = ft.tag_id
+		 WHERE ft.file_id = ? ORDER BY t.name`, fileID)
+	if err != nil {
+		return m, err
+	}
+	defer rows.Close()
+	m.Tags = []string{}
+	for rows.Next() {
+		var name string
+		if err := rows.Scan(&name); err != nil {
+			return m, err
+		}
+		m.Tags = append(m.Tags, name)
+	}
+	return m, rows.Err()
+}
+
+// UpdateFileMeta 原子更新文件元数据,写入四步与 UpdateFolderMeta 同款:
+// 删旧关联、词表 get-or-create、挂关联(先 trim 去重)、清死词。
+// 清死词必须 UNION 两张挂点表——只查一张会把另一形态(目录/文件)
+// 仍在用的同名词误删(TODO-17 坑记录,测试先行覆盖)。
+func (db *DB) UpdateFileMeta(fileID int64, u FileMetaUpdate) error {
+	return db.WithTx(func(tx *sql.Tx) error {
+		var n int
+		if err := tx.QueryRow(
+			`SELECT 1 FROM files WHERE id = ? AND deleted_at IS NULL`, fileID).Scan(&n); err != nil {
+			return fmt.Errorf("index: 文件 %d 不存在: %w", fileID, err)
+		}
+		if u.Note != nil {
+			if _, err := tx.Exec(`UPDATE files SET note = ? WHERE id = ?`, *u.Note, fileID); err != nil {
+				return err
+			}
+		}
+		if u.Tags != nil {
+			if _, err := tx.Exec(`DELETE FROM file_tags WHERE file_id = ?`, fileID); err != nil {
+				return err
+			}
+			seen := map[string]bool{}
+			for _, name := range u.Tags {
+				name = strings.TrimSpace(name)
+				if name == "" || seen[name] {
+					continue
+				}
+				seen[name] = true
+				if _, err := tx.Exec(
+					`INSERT INTO tags (name) VALUES (?) ON CONFLICT(name) DO NOTHING`, name); err != nil {
+					return err
+				}
+				if _, err := tx.Exec(
+					`INSERT OR IGNORE INTO file_tags (file_id, tag_id)
+					 SELECT ?, id FROM tags WHERE name = ?`, fileID, name); err != nil {
+					return err
+				}
+			}
+			// 清死词:词表被两形态共享,存活判定必须看全两张挂点表
+			if _, err := tx.Exec(
+				`DELETE FROM tags WHERE id NOT IN (
+					SELECT tag_id FROM folder_tags UNION SELECT tag_id FROM file_tags)`); err != nil {
+				return err
+			}
+		}
+		return nil
 	})
 }
 

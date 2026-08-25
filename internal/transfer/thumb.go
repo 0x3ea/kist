@@ -28,16 +28,19 @@ const (
 // 上传侧据此静默跳过,只有"是图片但生成失败"才记 Warn 日志(TODO-07)。
 var errNotImage = errors.New("thumb: 非受支持的图片类型")
 
-type thumbData struct {
-	data []byte
-	mime string
-	w, h int
+// ThumbData 是缩略图的编码产物;导出供 GUI 封面导入复用(TODO-17)——
+// 手动封面与上传缩略图同一规格,不另起一套。
+type ThumbData struct {
+	Data []byte
+	Mime string
+	W, H int
 }
 
-// makeThumbnail 为图片文件生成缩略图。解码/缩放/编码任一步失败都返回错误,
-// 由上传管线选择忽略——缩略图绝不阻断上传。
-func makeThumbnail(srcPath string) (thumbData, error) {
-	var t thumbData
+// MakeThumbnail 为图片文件生成缩略图。解码/缩放/编码任一步失败都返回错误:
+// 上传管线据此选择忽略(缩略图绝不阻断上传);GUI 封面导入则是显式用户
+// 动作,错误应原样上抛而非静默——两种策略都在调用方。
+func MakeThumbnail(srcPath string) (ThumbData, error) {
+	var t ThumbData
 	f, err := os.Open(srcPath)
 	if err != nil {
 		return t, err
@@ -93,35 +96,35 @@ func scaleBy(img image.Image, s float64) image.Image {
 
 // encodeThumb 编码并控制在预算内:含透明用 PNG(无质量旋钮,超限则再缩),
 // 否则 JPEG 从 q80 逐级降到 q20,仍超限则缩 75% 重来。
-func encodeThumb(img image.Image, maxBytes int) (thumbData, error) {
+func encodeThumb(img image.Image, maxBytes int) (ThumbData, error) {
 	if hasTransparency(img) {
 		for range 8 { // 最多缩 8 轮,1x1 的 PNG 必然达标
 			var buf bytes.Buffer
 			if err := png.Encode(&buf, img); err != nil {
-				return thumbData{}, err
+				return ThumbData{}, err
 			}
 			if buf.Len() <= maxBytes {
-				return thumbData{data: buf.Bytes(), mime: "image/png",
-					w: img.Bounds().Dx(), h: img.Bounds().Dy()}, nil
+				return ThumbData{Data: buf.Bytes(), Mime: "image/png",
+					W: img.Bounds().Dx(), H: img.Bounds().Dy()}, nil
 			}
 			img = scaleBy(img, 0.75)
 		}
-		return thumbData{}, fmt.Errorf("thumb: PNG 缩略图无法压入 %d 字节", maxBytes)
+		return ThumbData{}, fmt.Errorf("thumb: PNG 缩略图无法压入 %d 字节", maxBytes)
 	}
 	for round := 0; round < 8; round++ {
 		for q := 80; q >= 20; q -= 15 {
 			var buf bytes.Buffer
 			if err := jpeg.Encode(&buf, img, &jpeg.Options{Quality: q}); err != nil {
-				return thumbData{}, err
+				return ThumbData{}, err
 			}
 			if buf.Len() <= maxBytes {
-				return thumbData{data: buf.Bytes(), mime: "image/jpeg",
-					w: img.Bounds().Dx(), h: img.Bounds().Dy()}, nil
+				return ThumbData{Data: buf.Bytes(), Mime: "image/jpeg",
+					W: img.Bounds().Dx(), H: img.Bounds().Dy()}, nil
 			}
 		}
 		img = scaleBy(img, 0.75) // 最低质量仍超限(极端噪点图):缩小再来
 	}
-	return thumbData{}, fmt.Errorf("thumb: JPEG 缩略图无法压入 %d 字节", maxBytes)
+	return ThumbData{}, fmt.Errorf("thumb: JPEG 缩略图无法压入 %d 字节", maxBytes)
 }
 
 func hasTransparency(img image.Image) bool {

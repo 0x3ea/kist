@@ -201,7 +201,7 @@ func sortPackPlan(p *packPlan) {
 	})
 }
 
-// isImagePath 按扩展名挑封面候选(makeThumbnail 会再嗅探内容真伪)。
+// isImagePath 按扩展名挑封面候选(MakeThumbnail 会再嗅探内容真伪)。
 func isImagePath(name string) bool {
 	switch strings.ToLower(path.Ext(name)) {
 	case ".jpg", ".jpeg", ".png", ".gif", ".bmp", ".webp":

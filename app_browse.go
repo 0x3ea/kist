@@ -14,6 +14,7 @@ import (
 
 	"kist/internal/errs"
 	"kist/internal/index"
+	"kist/internal/transfer"
 )
 
 // FolderView 一次目录导航所需的全部数据:面包屑、条目(目录在前)、
@@ -102,7 +103,7 @@ func (a *App) SearchAll(query string, limit int) (v SearchView, err error) {
 }
 
 // FileDetail 是 FileRow 的 GUI 投影:摊平 sql.NullInt64(其 JSON 形态是
-// {Int64,Valid} 对象,不可直接透传),并补全虚拟路径与缩略图有无。
+// {Int64,Valid} 对象,不可直接透传),并补全虚拟路径、缩略图有无与 tag。
 type FileDetail struct {
 	ID          int64
 	UUID        string
@@ -120,6 +121,7 @@ type FileDetail struct {
 	EncryptedAt *int64 // nil = 无
 	UploadedAt  *int64
 	Note        string
+	Tags        []string // TODO-17:详情面板展示
 	HasThumb    bool
 }
 
@@ -157,6 +159,11 @@ func (a *App) FileInfo(fileID int64) (d FileDetail, err error) {
 	}
 	if f.Note.Valid {
 		d.Note = f.Note.String
+	}
+	if m, merr := db.GetFileMeta(fileID); merr == nil {
+		d.Tags = m.Tags
+	} else {
+		d.Tags = []string{} // 读不到不致命:详情以文件行为主
 	}
 	if _, _, terr := db.GetThumbnail(fileID); terr == nil {
 		d.HasThumb = true
@@ -319,6 +326,80 @@ func (a *App) UpdateFolderMeta(folderID int64, u index.FolderMetaUpdate) (err er
 	}
 	if err := db.UpdateFolderMeta(folderID, u); err != nil {
 		return a.wrap(errs.From(err))
+	}
+	a.emitIndexChanged("meta")
+	return nil
+}
+
+// ---- 文件元数据(TODO-17):tag 挂文件 + 手动封面 ----
+
+// GetFileMeta 读文件元数据(note/tags)。文件封面不经此口——封面就是文件
+// 自己的缩略图,读走 GetThumbnail,写走 SetFileCover(与目录的引用式不同)。
+func (a *App) GetFileMeta(fileID int64) (m index.FileMeta, err error) {
+	defer a.panicGuard(&err)
+	db, err := a.requireDB()
+	if err != nil {
+		return m, a.wrap(err)
+	}
+	m, err = db.GetFileMeta(fileID)
+	if err != nil {
+		return m, a.wrap(errs.From(err))
+	}
+	if m.Tags == nil {
+		m.Tags = []string{}
+	}
+	return m, nil
+}
+
+// UpdateFileMeta 增量写文件元数据,指针语义与 UpdateFolderMeta 一致
+// (Note nil=不动、空串=清除;Tags 非 nil 即全量覆盖)。
+func (a *App) UpdateFileMeta(fileID int64, u index.FileMetaUpdate) (err error) {
+	defer a.panicGuard(&err)
+	db, err := a.requireDB()
+	if err != nil {
+		return a.wrap(err)
+	}
+	if err := db.UpdateFileMeta(fileID, u); err != nil {
+		return a.wrap(errs.From(err))
+	}
+	a.emitIndexChanged("meta")
+	return nil
+}
+
+// SetFileCover 导入本地图片作为文件封面(TODO-17):与上传缩略图同一管线
+// 同一规格(transfer.MakeThumbnail)。localPath 空串 = 清除封面——文件侧
+// 的清除是删 thumbnails 行,与目录侧的 cover_file_id 置 NULL 不同。
+// 非图片/坏图在这里是显式用户动作:错误上抛不静默(上传管线才会忽略)。
+// pack 注意:覆盖会顶掉上传时自动保存的首页缩略图,清除后不恢复。
+func (a *App) SetFileCover(fileID int64, localPath string) (err error) {
+	defer a.panicGuard(&err)
+	db, err := a.requireDB()
+	if err != nil {
+		return a.wrap(err)
+	}
+	f, err := db.GetFile(fileID)
+	if err != nil {
+		return a.wrap(errs.From(err))
+	}
+	if f.DeletedAt.Valid {
+		return a.wrap(errs.New(errs.NotFound, "文件已删除:"+f.Name))
+	}
+	if localPath == "" {
+		if err := db.WithTx(func(tx *sql.Tx) error {
+			return db.DeleteThumbnail(tx, fileID)
+		}); err != nil {
+			return a.wrap(errs.From(err))
+		}
+	} else {
+		td, err := transfer.MakeThumbnail(localPath)
+		if err != nil {
+			return a.wrap(errs.New(errs.BadConfig, "封面导入失败:"+err.Error()))
+		}
+		if err := db.WithTx(func(tx *sql.Tx) error {
+			return db.PutThumbnail(tx, fileID, td.Data, td.W, td.H, td.Mime)
+		}); err != nil {
+			return a.wrap(errs.From(err))
+		}
 	}
 	a.emitIndexChanged("meta")
 	return nil

@@ -217,7 +217,7 @@ func (db *DB) GetFolderMeta(folderID int64) (FolderMeta, error) {
 }
 
 // UpdateFolderMeta 原子更新元数据。tag 写入走"全量覆盖":
-// 删旧关联、插新关联,再把无任何目录引用的死 tag 行清掉——
+// 删旧关联、插新关联,再把无任何挂点引用的死 tag 行清掉——
 // tags 表只承载有效词,搜索面与 meta list 不被残留污染。
 func (db *DB) UpdateFolderMeta(folderID int64, u FolderMetaUpdate) error {
 	return db.WithTx(func(tx *sql.Tx) error {
@@ -262,9 +262,12 @@ func (db *DB) UpdateFolderMeta(folderID int64, u FolderMetaUpdate) error {
 					return err
 				}
 			}
-			// 清死 tag:没有任何目录再引用的词不值得保留
+			// 清死 tag:没有任何挂点再引用的词不值得保留。v4 起词表被
+			// folder_tags 与 file_tags 共享(TODO-17),存活判定必须 UNION
+			// 两张挂点表——只查一张会误删另一形态仍在用的同名词。
 			if _, err := tx.Exec(
-				`DELETE FROM tags WHERE id NOT IN (SELECT DISTINCT tag_id FROM folder_tags)`); err != nil {
+				`DELETE FROM tags WHERE id NOT IN (
+					SELECT tag_id FROM folder_tags UNION SELECT tag_id FROM file_tags)`); err != nil {
 				return err
 			}
 		}

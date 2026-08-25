@@ -8,6 +8,11 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"image"
+	"image/color"
+	"image/jpeg"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -357,5 +362,97 @@ func TestGetThumbnailAndFileInfo(t *testing.T) {
 	}
 	if d.EncryptedAt != nil || d.UploadedAt != nil {
 		t.Fatalf("未上传文件的时间指针应为 nil:%+v", d)
+	}
+}
+
+// makeCoverJPEG 生成一张小渐变 JPEG(封面导入绑定的真实图片输入)。
+func makeCoverJPEG(t *testing.T, dir string) string {
+	t.Helper()
+	img := image.NewRGBA(image.Rect(0, 0, 64, 64))
+	for y := 0; y < 64; y++ {
+		for x := 0; x < 64; x++ {
+			img.Set(x, y, color.RGBA{R: uint8(x * 4), G: uint8(y * 4), B: 128, A: 255})
+		}
+	}
+	p := filepath.Join(dir, "cover.jpg")
+	f, err := os.Create(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer f.Close()
+	if err := jpeg.Encode(f, img, &jpeg.Options{Quality: 90}); err != nil {
+		t.Fatal(err)
+	}
+	return p
+}
+
+// TestFileMetaAndCoverBinding 文件元数据绑定(TODO-17):meta 往返、tag 进
+// 搜索面、封面导入/覆盖/清除、非图片报错不静默。
+func TestFileMetaAndCoverBinding(t *testing.T) {
+	a := newTestApp(t)
+	folder := seedFolder(t, a.db, "小说合集")
+	f := seedFile(t, a.db, folder, "第一卷.epub", false, 100)
+
+	// meta 往返:note + tags(含 trim/去重)
+	note := "作者:某人"
+	if err := a.UpdateFileMeta(f, index.FileMetaUpdate{Note: &note, Tags: []string{" 科幻 ", "科幻"}}); err != nil {
+		t.Fatal(err)
+	}
+	m, err := a.GetFileMeta(f)
+	if err != nil || m.Note != note {
+		t.Fatalf("note 往返:%+v %v", m, err)
+	}
+	if len(m.Tags) != 1 || m.Tags[0] != "科幻" {
+		t.Fatalf("tags 应去重去空白:%v", m.Tags)
+	}
+
+	// 文件 tag 进搜索面(SearchAll 与 CLI search 同一入口)
+	v, err := a.SearchAll("某人", 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(v.Files) != 1 || v.Files[0].ID != f {
+		t.Fatalf("tag 应命中文件:%+v", v.Files)
+	}
+	if len(v.Files[0].Tags) != 1 || v.Files[0].Tags[0] != "科幻" {
+		t.Fatalf("搜索结果应回填 tags:%+v", v.Files[0])
+	}
+
+	// 封面导入:真实 JPEG → thumbnails 落库,GetThumbnail 可读
+	cover := makeCoverJPEG(t, t.TempDir())
+	if err := a.SetFileCover(f, cover); err != nil {
+		t.Fatal(err)
+	}
+	td, err := a.GetThumbnail(f)
+	if err != nil || td.Mime != "image/jpeg" || len(td.Data) == 0 {
+		t.Fatalf("导入后的封面应可读:%+v %v", td, err)
+	}
+
+	// 非图片:显式用户动作,错误上抛(带 BAD_CONFIG 前缀)而非静默
+	notImg := filepath.Join(t.TempDir(), "x.txt")
+	if err := os.WriteFile(notImg, []byte("不是图片"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := a.SetFileCover(f, notImg); err == nil || !strings.HasPrefix(err.Error(), "[BAD_CONFIG]") {
+		t.Fatalf("非图片应 BAD_CONFIG 报错:%v", err)
+	}
+
+	// 清除封面:空路径 → NOT_FOUND;pack 覆盖确认属前端职责,绑定只管语义
+	if err := a.SetFileCover(f, ""); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := a.GetThumbnail(f); err == nil || !strings.HasPrefix(err.Error(), "[NOT_FOUND]") {
+		t.Fatalf("清除后应 NOT_FOUND:%v", err)
+	}
+
+	// 已删除文件:导入与 meta 写都拒绝
+	if err := a.DeleteEntries([]int64{f}, nil); err != nil {
+		t.Fatal(err)
+	}
+	if err := a.SetFileCover(f, cover); err == nil || !strings.HasPrefix(err.Error(), "[NOT_FOUND]") {
+		t.Fatalf("已删除文件的封面操作应 NOT_FOUND:%v", err)
+	}
+	if err := a.UpdateFileMeta(f, index.FileMetaUpdate{Tags: []string{"x"}}); err == nil {
+		t.Fatal("已删除文件的 meta 写应报错")
 	}
 }

@@ -71,3 +71,4 @@ v0.1 后的候选增强每项一篇独立评估文档,放在 [`todo/`](todo/),�
 | 08 | 大小混淆:blobVersion 2 量化填充(≤1MiB 归 4KiB 档、大文件 10% 阶梯,开销 ≤10%);交付与 SHA 只取真实明文,补零并入块加密受认证保护;读侧兼容 v1;设置 `size_padding` 可关 | 2026-08-20 |
 | 15 | 文件夹打包:put 递归下降、叶子目录成 pack(一话一对象),get 解压还原目录;--expand/--keep-zip;非 UTF-8 名/特殊文件整次 put 拒绝;schema v2 `files.pack` | 2026-08-21 |
 | 16 | 作品级元数据与聚合:schema v3(folders 加 note/user_meta/cover_file_id + tags/folder_tags 表);`FolderSummary` 纯查询子树聚合(全量内存建树,不用递归 CTE);封面三级回退链(CoverFileIDs ≤4,0=占位);`meta set/list`、search 兼查目录名/tag、`mv` 纯索引移动(远端零变化)、ls 目录行子树摘要(待传单列);实测 123pan 真实网盘全链路验收 | 2026-08-24 |
+| 17 | 文件元数据补齐:schema v4 `file_tags`(镜像 folder_tags、共享 tags 词表,死词清理 UNION 双表——两侧清理互不误伤同名词);文件封面 = 自身 thumbnails 行,GUI「导入封面」走 `MakeThumbnail` 同规格管线(空路径=清除,pack 覆盖有确认,坏图 BAD_CONFIG 不静默);`meta set` 支持 uuid\|id 文件目标;search 文件侧补 tag 命中、`FileHit`/`FileDetail` 回填 Tags;MetaDialog 泛化(文件形态带封面预览与即时导入/清除) | 2026-08-25 |

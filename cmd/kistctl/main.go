@@ -47,7 +47,7 @@ const usageText = `用法:kistctl <子命令> [参数]
   outbox  list|push|verify|discard       出站箱:待上传产物的搬运与收账(TODO-13)
   ls      [/路径]                        列虚拟目录(目录行附子树摘要:话数·大小·最近更新)
   search  <关键词>                       搜索文件名、备注、目录名与目录 tag
-  meta    set <目录> [--note 文本] [--tag a,b] [--cover <uuid|id|0>]  设置目录元数据(不带 flag 则显示当前值);meta list 列出全部
+  meta    set <目录|文件> [--note 文本] [--tag a,b] [--cover <uuid|id|0>(仅目录)]  设置元数据(不带 flag 则显示当前值);meta list 列出全部
   mv      <uuid|id...> <目标目录>        纯索引移动文件,零远端流量(归属给错时的便宜纠错)
   get     <uuid|id> --to <目录> [--keep-zip] --pass-stdin  下载解密(文件夹条目还原成目录;--keep-zip 落 zip)
   info    <uuid|id>                      查看明细(时间/备注/缩略图)
@@ -826,7 +826,7 @@ func folderMetaLine(note string, tags []string, coverFileID int64) string {
 
 func cmdMeta(args []string) error {
 	if len(args) == 0 {
-		return errs.New(errs.BadConfig, "用法:kistctl meta <set <目录> --note/--tag/--cover | list>")
+		return errs.New(errs.BadConfig, "用法:kistctl meta <set <目录路径|文件uuid|id> --note/--tag/--cover(cover 仅目录) | list>")
 	}
 	switch args[0] {
 	case "set":
@@ -847,13 +847,17 @@ func cmdMetaSet(args []string) error {
 		return err
 	}
 	if fs.NArg() == 0 {
-		return errs.New(errs.BadConfig, "meta set 需要 <目录路径>(从根写起,如 /作品A)")
+		return errs.New(errs.BadConfig, "meta set 需要 <目录路径|文件uuid|id>(目录从根写起,如 /作品A)")
 	}
 	db, err := openIndex()
 	if err != nil {
 		return err
 	}
 	defer db.Close()
+	// 目标分派(TODO-17):"/" 开头是目录路径,否则视作文件 uuid|id(与 rm/get 同款)
+	if target := fs.Arg(0); !strings.HasPrefix(target, "/") {
+		return metaSetFile(db, target, fs, note, tag)
+	}
 	segs, err := splitVirtualPath(fs.Arg(0))
 	if err != nil {
 		return err
@@ -890,6 +894,45 @@ func cmdMetaSet(args []string) error {
 		return nil
 	}
 	if err := db.UpdateFolderMeta(folderID, upd); err != nil {
+		return errs.From(err)
+	}
+	fmt.Println("已保存")
+	return nil
+}
+
+// metaSetFile 文件元数据(TODO-17):--note/--tag 语义与目录侧一致;
+// --cover 仅目录——文件封面是自身的缩略图行,导入/清除是 GUI 元数据面板的
+// 对话框操作,CLI 不设等价 flag(真有需要再加 --cover-file)。
+func metaSetFile(db *index.DB, target string, fs *flag.FlagSet, note, tag *string) error {
+	f, err := resolveTarget(db, target)
+	if err != nil {
+		return err
+	}
+	if f.DeletedAt.Valid {
+		return errs.New(errs.NotFound, "文件已删除:"+f.Name)
+	}
+	if flagProvided(fs, "cover") {
+		return errs.New(errs.BadConfig, "--cover 仅用于目录;文件封面的导入/清除请在 GUI 元数据面板操作")
+	}
+	// 与目录侧同款探测:区分"未提供"与"提供了空串"(空串 = 清除)
+	var upd index.FileMetaUpdate
+	fs.Visit(func(fl *flag.Flag) {
+		switch fl.Name {
+		case "note":
+			upd.Note = note
+		case "tag":
+			upd.Tags = parseTagList(*tag)
+		}
+	})
+	if upd.Note == nil && upd.Tags == nil {
+		m, err := db.GetFileMeta(f.ID)
+		if err != nil {
+			return errs.From(err)
+		}
+		fmt.Printf("%d\t%s\t%s\n", f.ID, f.Name, folderMetaLine(m.Note, m.Tags, 0))
+		return nil
+	}
+	if err := db.UpdateFileMeta(f.ID, upd); err != nil {
 		return errs.From(err)
 	}
 	fmt.Println("已保存")

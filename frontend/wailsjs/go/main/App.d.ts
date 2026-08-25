@@ -24,6 +24,8 @@ export function FileInfo(arg1:number):Promise<main.FileDetail>;
 
 export function GetAppState():Promise<main.AppState>;
 
+export function GetFileMeta(arg1:number):Promise<index.FileMeta>;
+
 export function GetFolderMeta(arg1:number):Promise<index.FolderMeta>;
 
 export function GetSettings():Promise<config.Settings>;
@@ -44,6 +46,8 @@ export function PickDir():Promise<string>;
 
 export function PickFiles():Promise<Array<string>>;
 
+export function PickImageFile():Promise<string>;
+
 export function PreviewGC():Promise<main.GCReport>;
 
 export function RunGC():Promise<main.GCReport>;
@@ -54,6 +58,8 @@ export function SaveWebDAVConfig(arg1:main.WebDAVConfig):Promise<void>;
 
 export function SearchAll(arg1:string,arg2:number):Promise<main.SearchView>;
 
+export function SetFileCover(arg1:number,arg2:string):Promise<void>;
+
 export function SetNote(arg1:number,arg2:string):Promise<void>;
 
 export function SetUserMeta(arg1:number,arg2:string):Promise<void>;
@@ -63,6 +69,8 @@ export function TestConnection(arg1:main.WebDAVConfig):Promise<main.TestResult>;
 export function Transfers():Promise<Array<transfer.Transfer>>;
 
 export function Unlock(arg1:string):Promise<main.UnlockResult>;
+
+export function UpdateFileMeta(arg1:number,arg2:index.FileMetaUpdate):Promise<void>;
 
 export function UpdateFolderMeta(arg1:number,arg2:index.FolderMetaUpdate):Promise<void>;
 

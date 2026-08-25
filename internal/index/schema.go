@@ -2,7 +2,7 @@ package index
 
 // migrations 按版本顺序排列,由 db.migrate() 按 PRAGMA user_version 逐个应用。
 // 结构变更时只允许追加新脚本,不得修改历史脚本(老库要靠它们升级)。
-var migrations = []string{v1Schema, v2AddPack, v3FolderMeta}
+var migrations = []string{v1Schema, v2AddPack, v3FolderMeta, v4FileTags}
 
 // v2(TODO-15):files.pack 标记"目录打包条目"——明文区是一个 zip,
 // get 侧解压还原成文件夹。size 记量化后的明文区总长(显示值,
@@ -30,6 +30,19 @@ CREATE TABLE IF NOT EXISTS folder_tags (
 
 -- 按 tag 反查目录(SearchFolders 的 EXISTS 子查询走这头)
 CREATE INDEX IF NOT EXISTS ix_folder_tags_tag ON folder_tags(tag_id);`
+
+// v4(TODO-17):文件 tag 挂点,镜像 folder_tags、共享 tags 词表——
+// 文件形态作品(epub/mp4/直挂 pack)与目录作品同一词典,"按 tag 捞作品"
+// 横跨两形态。tags 表本就 UNIQUE(name),两挂点表 get-or-create 同一词,
+// 不会分家。
+const v4FileTags = `
+CREATE TABLE IF NOT EXISTS file_tags (
+  file_id INTEGER NOT NULL REFERENCES files(id) ON DELETE CASCADE,
+  tag_id  INTEGER NOT NULL REFERENCES tags(id)   ON DELETE CASCADE,
+  UNIQUE(file_id, tag_id));
+
+-- 按 tag 反查文件(文件搜索的 EXISTS 子查询走这头)
+CREATE INDEX IF NOT EXISTS ix_file_tags_tag ON file_tags(tag_id);`
 
 const v1Schema = `
 CREATE TABLE IF NOT EXISTS folders (
