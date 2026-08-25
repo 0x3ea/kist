@@ -346,6 +346,22 @@ export async function moveSelected(destPath: string): Promise<boolean> {
   }
 }
 
+/** 在当前目录下建虚拟文件夹(可多级,幂等);零远端流量(TODO-18) */
+export async function createFolder(name: string): Promise<boolean> {
+  const base = store.folder.crumbs
+    .slice(1)
+    .map((c) => c.Name)
+    .join('/')
+  try {
+    await API.EnsureFolder(base ? `/${base}/${name}` : `/${name}`)
+    toast('info', '文件夹已创建')
+    return true
+  } catch (e) {
+    fail(e)
+    return false
+  }
+}
+
 export async function getFolderMeta(folderID: number): Promise<index.FolderMeta | null> {
   try {
     return await API.GetFolderMeta(folderID)

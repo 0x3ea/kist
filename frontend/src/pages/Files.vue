@@ -18,10 +18,12 @@ import CardGrid from '../components/CardGrid.vue'
 import DetailPanel from '../components/DetailPanel.vue'
 import MoveDialog from '../components/MoveDialog.vue'
 import MetaDialog from '../components/MetaDialog.vue'
+import NewFolderDialog from '../components/NewFolderDialog.vue'
 import { humanSize } from '../format'
 
 const query = ref('')
 const showMove = ref(false)
+const showNewFolder = ref(false)
 // 元数据对话框目标:目录(TODO-16)或文件(TODO-17),恰好选中一个时可用
 const metaTarget = ref<{ mode: 'folder' | 'file'; id: number; name: string; pack: boolean } | null>(null)
 
@@ -85,6 +87,7 @@ function onMeta() {
       <span class="spacer" />
       <button @click="onUpload('files')">上传文件</button>
       <button @click="onUpload('folder')">上传文件夹</button>
+      <button @click="showNewFolder = true">新建文件夹</button>
       <button :disabled="store.selection.size === 0" @click="downloadSelected">下载</button>
       <button :disabled="store.selection.size === 0" @click="showMove = true">移动</button>
       <button
@@ -145,6 +148,7 @@ function onMeta() {
     </template>
 
     <MoveDialog v-if="showMove" @close="showMove = false" />
+    <NewFolderDialog v-if="showNewFolder" @close="showNewFolder = false" />
     <MetaDialog
       v-if="metaTarget"
       :mode="metaTarget.mode"

@@ -72,3 +72,4 @@ v0.1 后的候选增强每项一篇独立评估文档,放在 [`todo/`](todo/),�
 | 15 | 文件夹打包:put 递归下降、叶子目录成 pack(一话一对象),get 解压还原目录;--expand/--keep-zip;非 UTF-8 名/特殊文件整次 put 拒绝;schema v2 `files.pack` | 2026-08-21 |
 | 16 | 作品级元数据与聚合:schema v3(folders 加 note/user_meta/cover_file_id + tags/folder_tags 表);`FolderSummary` 纯查询子树聚合(全量内存建树,不用递归 CTE);封面三级回退链(CoverFileIDs ≤4,0=占位);`meta set/list`、search 兼查目录名/tag、`mv` 纯索引移动(远端零变化)、ls 目录行子树摘要(待传单列);实测 123pan 真实网盘全链路验收 | 2026-08-24 |
 | 17 | 文件元数据补齐:schema v4 `file_tags`(镜像 folder_tags、共享 tags 词表,死词清理 UNION 双表——两侧清理互不误伤同名词);文件封面 = 自身 thumbnails 行,GUI「导入封面」走 `MakeThumbnail` 同规格管线(空路径=清除,pack 覆盖有确认,坏图 BAD_CONFIG 不静默);`meta set` 支持 uuid\|id 文件目标;search 文件侧补 tag 命中、`FileHit`/`FileDetail` 回填 Tags;MetaDialog 泛化(文件形态带封面预览与即时导入/清除) | 2026-08-25 |
+| 18 | 新建虚拟目录:CLI `mkdir`(多级、幂等 mkdir -p 语义,`..` 拒绝,纯索引零流量)+ GUI 工具栏「新建文件夹」(当前目录下,输入可含 `/` 建多级,重名幂等复用);沙盒实测建/幂等/拒绝/ls 可见。原诉求的上传粒度选择砍掉并存档结论:批量上传文件从不打包,逐文件形态由「mkdir → 批量传文件」组合达成,CLI `--expand` 一直在 | 2026-08-25 |
