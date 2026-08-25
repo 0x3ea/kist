@@ -23,6 +23,8 @@ let searchTimer: ReturnType<typeof setTimeout> | null = null
 export const store = reactive({
   /** 后端 app:state 快照(startup 事件早于订阅会丢,init 主动拉) */
   state: { Configured: false, Unlocked: false, FileCount: 0, HasLocalKeyfile: false },
+  /** init() 拉回真实 state 后置真——此前 state 是初值,分支判定不可依赖 */
+  ready: false,
   page: 'files' as Page,
 
   // Files 页
@@ -80,6 +82,7 @@ function setBusy(text: string): () => void {
 
 export async function init() {
   await refreshState()
+  store.ready = true
   store.transfers = (await API.Transfers()) ?? []
   EventsOn('app:state', (s) => Object.assign(store.state, s ?? {}))
   EventsOn('transfers:changed', (ts) => (store.transfers = ts ?? []))

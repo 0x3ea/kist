@@ -23,11 +23,16 @@ const autoMode = computed<Mode>(() => {
   return state.HasLocalKeyfile ? 'unlock' : 'recover'
 })
 
-// 启动即未配置(或状态刷新发现未配置)且用户未显式选过 → 进入并粘住向导
+// 启动即未配置(或状态刷新发现未配置)且用户未显式选过 → 进入并粘住向导。
+// 前提是真实状态已拉回:state 初值 Configured=false,init() 异步拉回前
+// autoMode 短暂为 wizard,若此时置粘性,建户后的二次启动(应为登录)与新
+// 设备(应为恢复)都会被按在向导里——ready 前一律不判。
 watch(
   autoMode,
   (m) => {
+    if (!store.ready) return
     if (m === 'wizard' && manualMode.value === null) manualMode.value = 'wizard'
+    if (m === 'unlock') manualMode.value = null // 登录终态,粘性让位(防御)
   },
   { immediate: true },
 )
