@@ -216,6 +216,7 @@ GUI 是纯壳:**零业务逻辑,只编排 internal/***。与 CLI 的关系是同
 | meta set/list | 目录/文件元数据:tag/note/封面引用(TODO-16/17;文件目标用 uuid\|id,--cover 仅目录,文件封面导入走 GUI) | ✗ | `UpdateFolderMeta`/`UpdateFileMeta` |
 | mv | 纯索引移动文件(改挂点,零远端流量;重名自动消解) | ✗ | `MoveFiles` |
 | mkdir | 建虚拟目录(多级、幂等 mkdir -p 语义;纯索引零流量) | ✗ | `EnsureFolderPath` |
+| rename | 重命名目录(同名幂等 no-op;撞名报错不消解;根/软删/非法段拒绝;纯索引零流量) | ✗ | `RenameFolder` |
 | get [--keep-zip] | 下载解密;pack 还原成目录(或落 zip) | ✓ | `Manager.DownloadTo` |
 | rm | 软删 + blob 标 trash | ✗ | `SoftDeleteFiles`+`MarkBlobTrash` |
 | gc [--dry-run] | 清 trash、报孤儿 | ✗ | `RunGC` |

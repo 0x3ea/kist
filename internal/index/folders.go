@@ -2,6 +2,7 @@ package index
 
 import (
 	"database/sql"
+	"errors"
 	"fmt"
 	"strings"
 )
@@ -150,6 +151,50 @@ func (db *DB) ResolveFolderPath(segs []string) (int64, error) {
 		cur = id
 	}
 	return cur, nil
+}
+
+// RenameFolder 重命名目录(TODO-19):纯索引零流量——目录名与 blob 名、
+// 远端布局无关,改名只动 folders.name。语义:
+//   - 同名 no-op 成功(事务外判定:不进 WithTx 就不多计 revision,
+//     空转不该触发一轮备份);
+//   - 撞名报错,不自动 "(1)" 消解——重命名是显式单发动作,撞名多半是
+//     选错目标,自动后缀会制造意外名(与 mv 的批量搬迁消解不同场景);
+//   - 新名必须是单段合法目录名(EnsureFolderPath 同规则);
+//   - 根(id=1)不可改:根名约定为空串,路径拼接依赖它。
+func (db *DB) RenameFolder(folderID int64, name string) error {
+	if folderID == rootFolderID {
+		return fmt.Errorf("index: 根目录不可重命名")
+	}
+	if name == "" || name == "." || name == ".." || strings.Contains(name, "/") {
+		return fmt.Errorf("index: 非法目录名 %q(需为单段,不含 \"/\",非 \".\"/\"..\")", name)
+	}
+	var parent sql.NullInt64
+	var old string
+	err := db.QueryRow(
+		`SELECT parent_id, name FROM folders WHERE id = ? AND deleted_at IS NULL`,
+		folderID).Scan(&parent, &old)
+	if err != nil {
+		return fmt.Errorf("index: 目录 %d 不存在: %w", folderID, err)
+	}
+	if name == old {
+		return nil
+	}
+	return db.WithTx(func(tx *sql.Tx) error {
+		// 撞名在事务内复核(ux_folders_live 唯一索引兜底):并发两个目录
+		// 改成同名时,后进事务者在这里被拒
+		var n int
+		err := tx.QueryRow(
+			`SELECT 1 FROM folders WHERE parent_id = ? AND name = ? AND deleted_at IS NULL AND id != ?`,
+			parent, name, folderID).Scan(&n)
+		if err == nil {
+			return fmt.Errorf("index: 同级已有同名目录 %q", name)
+		}
+		if !errors.Is(err, sql.ErrNoRows) {
+			return err
+		}
+		_, err = tx.Exec(`UPDATE folders SET name = ? WHERE id = ?`, name, folderID)
+		return err
+	})
 }
 
 // SoftDeleteFolders 软删除目录(其下文件经查询侧过滤随之不可见)。

@@ -375,4 +375,76 @@ func TestMetaSurvivesSnapshot(t *testing.T) {
 	}
 }
 
+// TestRenameFolder 目录重命名(TODO-19):往返、同名 no-op 不计 revision、
+// 撞名报错不消解、跨级同名放行、根/软删/非法段拒绝。
+func TestRenameFolder(t *testing.T) {
+	db := newTestDB(t)
+	idA := mustFolder(t, db, "作品A")
+	idB := mustFolder(t, db, "作品B")
+
+	names := func() []string {
+		entries, err := db.ListFolder(1)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var out []string
+		for _, e := range entries {
+			if e.IsFolder {
+				out = append(out, e.Name)
+			}
+		}
+		return out
+	}
+
+	rev0, _ := db.Revision()
+	if err := db.RenameFolder(idA, "作品A"); err != nil {
+		t.Fatal(err)
+	}
+	if rev, _ := db.Revision(); rev != rev0 {
+		t.Fatalf("同名 no-op 不应计 revision: %d → %d", rev0, rev)
+	}
+
+	if err := db.RenameFolder(idA, "改名后的A"); err != nil {
+		t.Fatal(err)
+	}
+	if rev, _ := db.Revision(); rev != rev0+1 {
+		t.Fatalf("真改名应计一次 revision: %d → %d", rev0, rev)
+	}
+	got := names()
+	if !slices.Contains(got, "改名后的A") || slices.Contains(got, "作品A") {
+		t.Fatalf("改名后目录名不符: %v", got)
+	}
+
+	// 撞名:报错不消解(重命名是显式单发动作)
+	if err := db.RenameFolder(idB, "改名后的A"); err == nil {
+		t.Fatal("撞名应报错而非自动消解")
+	}
+
+	// 跨级同名放行:唯一性只约束同父
+	sub := mustFolder(t, db, "作品B", "子层")
+	if err := db.RenameFolder(sub, "改名后的A"); err != nil {
+		t.Fatalf("跨级同名应放行: %v", err)
+	}
+
+	// 根/软删/非法段拒绝
+	if err := db.RenameFolder(rootFolderID, "新根"); err == nil {
+		t.Fatal("根目录不可重命名")
+	}
+	for _, bad := range []string{"", "a/b", "..", "."} {
+		if err := db.RenameFolder(idA, bad); err == nil {
+			t.Fatalf("非法目录名 %q 应拒绝", bad)
+		}
+	}
+	if err := db.SoftDeleteFolders([]int64{idA}); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.RenameFolder(idA, "又改名"); err == nil {
+		t.Fatal("软删后的目录不可重命名")
+	}
+	// 不存在的目录
+	if err := db.RenameFolder(9999, "x"); err == nil {
+		t.Fatal("不存在的目录应报错")
+	}
+}
+
 var _ = sql.NullString{} // 保留 import:row() 的调用方将来可能需要显式 NULL 字段

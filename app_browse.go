@@ -299,6 +299,21 @@ func (a *App) MoveFiles(fileIDs []int64, destFolderID int64) (err error) {
 	return nil
 }
 
+// RenameFolder 重命名目录(TODO-19):纯索引零流量。同名幂等;撞名报错
+// 不自动消解;根不可改——语义与索引层 index.RenameFolder 一致。
+func (a *App) RenameFolder(folderID int64, name string) (err error) {
+	defer a.panicGuard(&err)
+	db, err := a.requireDB()
+	if err != nil {
+		return a.wrap(err)
+	}
+	if err := db.RenameFolder(folderID, name); err != nil {
+		return a.wrap(errs.From(err))
+	}
+	a.emitIndexChanged("rename")
+	return nil
+}
+
 // GetFolderMeta 读目录元数据(note/tags/cover);三不原则:不继承、不合并、无告警。
 func (a *App) GetFolderMeta(folderID int64) (m index.FolderMeta, err error) {
 	defer a.panicGuard(&err)

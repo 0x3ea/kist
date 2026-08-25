@@ -50,6 +50,8 @@ export function PickImageFile():Promise<string>;
 
 export function PreviewGC():Promise<main.GCReport>;
 
+export function RenameFolder(arg1:number,arg2:string):Promise<void>;
+
 export function RunGC():Promise<main.GCReport>;
 
 export function SaveSettings(arg1:config.Settings):Promise<void>;

@@ -19,11 +19,14 @@ import DetailPanel from '../components/DetailPanel.vue'
 import MoveDialog from '../components/MoveDialog.vue'
 import MetaDialog from '../components/MetaDialog.vue'
 import NewFolderDialog from '../components/NewFolderDialog.vue'
+import RenameDialog from '../components/RenameDialog.vue'
 import { humanSize } from '../format'
 
 const query = ref('')
 const showMove = ref(false)
 const showNewFolder = ref(false)
+// 重命名目标(TODO-19,仅目录):恰好选中一个目录时可用
+const renameTarget = ref<{ id: number; name: string } | null>(null)
 // 元数据对话框目标:目录(TODO-16)或文件(TODO-17),恰好选中一个时可用
 const metaTarget = ref<{ mode: 'folder' | 'file'; id: number; name: string; pack: boolean } | null>(null)
 
@@ -54,6 +57,12 @@ async function onDelete() {
   const extra = store.folderSelection.size > 0 ? '\n注意:目录只从列表隐藏,其内文件需逐个删除后由「孤儿清理」回收远端空间。' : ''
   if (!confirm(`删除 ${n} 个条目?${extra}`)) return
   await deleteEntries()
+}
+
+function onRename() {
+  const id = [...store.folderSelection][0]
+  if (!id) return
+  renameTarget.value = { id, name: store.folder.entries.find((e) => e.ID === id)?.Name ?? '' }
 }
 
 function onMeta() {
@@ -88,6 +97,7 @@ function onMeta() {
       <button @click="onUpload('files')">上传文件</button>
       <button @click="onUpload('folder')">上传文件夹</button>
       <button @click="showNewFolder = true">新建文件夹</button>
+      <button :disabled="store.folderSelection.size !== 1" @click="onRename">重命名</button>
       <button :disabled="store.selection.size === 0" @click="downloadSelected">下载</button>
       <button :disabled="store.selection.size === 0" @click="showMove = true">移动</button>
       <button
@@ -149,6 +159,12 @@ function onMeta() {
 
     <MoveDialog v-if="showMove" @close="showMove = false" />
     <NewFolderDialog v-if="showNewFolder" @close="showNewFolder = false" />
+    <RenameDialog
+      v-if="renameTarget"
+      :folder-i-d="renameTarget.id"
+      :current-name="renameTarget.name"
+      @close="renameTarget = null"
+    />
     <MetaDialog
       v-if="metaTarget"
       :mode="metaTarget.mode"

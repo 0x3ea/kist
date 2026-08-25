@@ -50,6 +50,7 @@ const usageText = `用法:kistctl <子命令> [参数]
   meta    set <目录|文件> [--note 文本] [--tag a,b] [--cover <uuid|id|0>(仅目录)]  设置元数据(不带 flag 则显示当前值);meta list 列出全部
   mv      <uuid|id...> <目标目录>        纯索引移动文件,零远端流量(归属给错时的便宜纠错)
   mkdir   /路径                          建虚拟目录(多级、幂等;纯索引零流量,先建目录再往里 put)
+  rename  /路径 新名                     重命名目录(纯索引零流量;同名幂等,撞名报错)
   get     <uuid|id> --to <目录> [--keep-zip] --pass-stdin  下载解密(文件夹条目还原成目录;--keep-zip 落 zip)
   info    <uuid|id>                      查看明细(时间/备注/缩略图)
   note    <id> [--set 文本]              查看/设置备注
@@ -98,6 +99,8 @@ func run(args []string) error {
 		err = cmdMv(rest)
 	case "mkdir":
 		err = cmdMkdir(rest)
+	case "rename":
+		err = cmdRename(rest)
 	case "get":
 		err = cmdGet(rest)
 	case "info":
@@ -1043,6 +1046,35 @@ func cmdMkdir(args []string) error {
 		return errs.From(err) // 非法段("."/"..")在这里被拒
 	}
 	fmt.Printf("已确保目录存在:%s(id %d,纯索引操作零流量)\n", virtualPathOf(segs), id)
+	return nil
+}
+
+// cmdRename 重命名目录(TODO-19):纯索引零流量,目录按 /路径 指认(与 meta 同款)。
+// 同名幂等 no-op;撞名报错不自动消解(索引层语义)。
+func cmdRename(args []string) error {
+	if len(args) != 2 {
+		return errs.New(errs.BadConfig, "用法:kistctl rename <目录路径> <新名>(如 kistctl rename /漫画库/作品A 新名字)")
+	}
+	db, err := openIndex()
+	if err != nil {
+		return err
+	}
+	defer db.Close()
+	segs, err := splitVirtualPath(args[0])
+	if err != nil {
+		return err
+	}
+	if len(segs) == 0 {
+		return errs.New(errs.BadConfig, "根目录不可重命名")
+	}
+	folderID, err := db.ResolveFolderPath(segs)
+	if err != nil {
+		return errs.From(err)
+	}
+	if err := db.RenameFolder(folderID, args[1]); err != nil {
+		return errs.From(err)
+	}
+	fmt.Printf("已重命名:%s → %s(纯索引零流量)\n", segs[len(segs)-1], args[1])
 	return nil
 }
 

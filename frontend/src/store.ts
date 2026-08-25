@@ -362,6 +362,18 @@ export async function createFolder(name: string): Promise<boolean> {
   }
 }
 
+/** 重命名目录(纯索引零流量);撞名/非法名由后端报错走 toast(TODO-19) */
+export async function renameFolder(folderID: number, name: string): Promise<boolean> {
+  try {
+    await API.RenameFolder(folderID, name)
+    toast('info', '已重命名')
+    return true
+  } catch (e) {
+    fail(e)
+    return false
+  }
+}
+
 export async function getFolderMeta(folderID: number): Promise<index.FolderMeta | null> {
   try {
     return await API.GetFolderMeta(folderID)
