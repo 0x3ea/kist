@@ -98,6 +98,10 @@ export function PreviewGC() {
   return window['go']['main']['App']['PreviewGC']();
 }
 
+export function RenameFile(arg1, arg2) {
+  return window['go']['main']['App']['RenameFile'](arg1, arg2);
+}
+
 export function RenameFolder(arg1, arg2) {
   return window['go']['main']['App']['RenameFolder'](arg1, arg2);
 }

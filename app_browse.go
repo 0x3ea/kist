@@ -352,6 +352,22 @@ func (a *App) RenameFolder(folderID int64, name string) (err error) {
 	return nil
 }
 
+// RenameFile 重命名文件:文件名只存索引(blob 密封元数据仅 uuid,远端对象
+// 是随机名),纯索引零流量。语义与 RenameFolder 一致:同名幂等;撞名报错
+// 不自动消解。
+func (a *App) RenameFile(fileID int64, name string) (err error) {
+	defer a.panicGuard(&err)
+	db, err := a.requireDB()
+	if err != nil {
+		return a.wrap(err)
+	}
+	if err := db.RenameFile(fileID, name); err != nil {
+		return a.wrap(errs.From(err))
+	}
+	a.emitIndexChanged("rename")
+	return nil
+}
+
 // GetFolderMeta 读目录元数据(note/tags/cover);三不原则:不继承、不合并、无告警。
 func (a *App) GetFolderMeta(folderID int64) (m index.FolderMeta, err error) {
 	defer a.panicGuard(&err)

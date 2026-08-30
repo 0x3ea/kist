@@ -1,10 +1,11 @@
 <script setup lang="ts">
-// RenameDialog.vue — 目录重命名(TODO-19):纯索引零流量。预填当前名并全选;
-// 同名提交是幂等 no-op;撞名后端报错走 toast(不自动消解——显式单发动作)。
+// RenameDialog.vue — 重命名(TODO-19 目录,后续扩展文件):纯索引零流量。
+// 预填当前名并全选;同名提交是幂等 no-op;撞名后端报错走 toast(不自动
+// 消解——显式单发动作)。kind 分派目录/文件的 API。
 import { nextTick, ref } from 'vue'
-import { renameFolder, store } from '../store'
+import { renameFile, renameFolder, store } from '../store'
 
-const props = defineProps<{ folderID: number; currentName: string }>()
+const props = defineProps<{ kind: 'folder' | 'file'; id: number; currentName: string }>()
 const emit = defineEmits<{ close: [] }>()
 
 const name = ref(props.currentName)
@@ -21,11 +22,11 @@ async function onRename() {
     return
   }
   if (n.includes('/')) {
-    store.toasts.push({ id: Date.now(), level: 'error', text: '目录名不能含 "/"(多级请用新建文件夹或分次改名)' })
+    store.toasts.push({ id: Date.now(), level: 'error', text: '名称不能含 "/"(多级请用新建文件夹或分次改名)' })
     return
   }
   busy.value = true
-  const ok = await renameFolder(props.folderID, n)
+  const ok = props.kind === 'folder' ? await renameFolder(props.id, n) : await renameFile(props.id, n)
   busy.value = false
   if (ok) emit('close')
 }
@@ -34,7 +35,7 @@ async function onRename() {
 <template>
   <div class="mask" @click.self="emit('close')">
     <div class="dialog">
-      <h3>重命名目录</h3>
+      <h3>{{ kind === 'folder' ? '重命名目录' : '重命名文件' }}</h3>
       <p class="path">{{ currentName }}</p>
       <input
         ref="inputEl"
@@ -43,7 +44,7 @@ async function onRename() {
         placeholder="新名称"
         @keydown.enter="onRename"
       />
-      <p class="hint">纯索引操作,零远端流量;同级已有同名目录会报错(不自动加后缀)。</p>
+      <p class="hint">纯索引操作,零远端流量;同级已有同名{{ kind === 'folder' ? '目录' : '文件' }}会报错(不自动加后缀)。</p>
       <div class="row">
         <button @click="emit('close')">取消</button>
         <button class="primary" :disabled="busy || !name.trim()" @click="onRename">重命名</button>

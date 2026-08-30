@@ -421,6 +421,60 @@ func TestMetaSurvivesSnapshot(t *testing.T) {
 
 // TestRenameFolder 目录重命名(TODO-19):往返、同名 no-op 不计 revision、
 // 撞名报错不消解、跨级同名放行、根/软删/非法段拒绝。
+// TestRenameFile 文件重命名:纯索引零流量,语义对齐 RenameFolder
+// (同名 no-op 不计 revision;真改名计一次;撞名报错;非法名拒绝;
+// 软删文件不可改名;跨级同名放行)。
+func TestRenameFile(t *testing.T) {
+	db := newTestDB(t)
+	idA := mustFolder(t, db, "作品A")
+	idB := mustFolder(t, db, "作品B")
+	f1 := mustFileRow(t, db, row("第01话.epub", idA, false, "ready", 10, 1))
+	f2 := mustFileRow(t, db, row("第02话.epub", idA, false, "ready", 11, 2))
+	other := mustFileRow(t, db, row("同名.epub", idB, false, "ready", 12, 3))
+
+	rev0, _ := db.Revision()
+	if err := db.RenameFile(f1, "第01话.epub"); err != nil {
+		t.Fatal(err)
+	}
+	if rev, _ := db.Revision(); rev != rev0 {
+		t.Fatalf("同名 no-op 不应计 revision: %d → %d", rev0, rev)
+	}
+
+	if err := db.RenameFile(f1, "改名话.epub"); err != nil {
+		t.Fatal(err)
+	}
+	if rev, _ := db.Revision(); rev != rev0+1 {
+		t.Fatalf("真改名应计一次 revision: %d → %d", rev0, rev)
+	}
+	got, err := db.GetFile(f1)
+	if err != nil || got.Name != "改名话.epub" {
+		t.Fatalf("改名后文件名不符: %+v %v", got, err)
+	}
+
+	// 撞名:报错不消解
+	if err := db.RenameFile(f2, "改名话.epub"); err == nil {
+		t.Fatal("撞名应报错而非自动消解")
+	}
+	// 跨级同名放行(唯一性只约束同目录,与上传消解同口径)
+	if err := db.RenameFile(other, "改名话.epub"); err != nil {
+		t.Fatalf("跨级同名应放行: %v", err)
+	}
+
+	// 非法段拒绝
+	for _, bad := range []string{"", "a/b", "..", "."} {
+		if err := db.RenameFile(f1, bad); err == nil {
+			t.Fatalf("非法名 %q 应报错", bad)
+		}
+	}
+	// 软删文件不可改名
+	if err := db.SoftDeleteFiles([]int64{f2}); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.RenameFile(f2, "删后再改.epub"); err == nil {
+		t.Fatal("软删文件应不可改名")
+	}
+}
+
 func TestRenameFolder(t *testing.T) {
 	db := newTestDB(t)
 	idA := mustFolder(t, db, "作品A")

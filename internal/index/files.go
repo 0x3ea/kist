@@ -317,6 +317,43 @@ func (db *DB) SetNote(id int64, note string) error {
 	})
 }
 
+// RenameFile 重命名文件:文件名只存本地索引(blob 密封元数据只有 uuid,
+// 网盘侧对象名是随机名),纯索引零流量,语义与 RenameFolder 一致——
+//   - 同名 no-op 成功(事务外判定:不进 WithTx 就不多计 revision);
+//   - 撞名报错,不自动 "(1)" 消解(显式单发动作,撞名多半是选错目标);
+//   - 新名必须是单段合法名。
+//
+// 撞名判定复用上传侧 nameTakenTx(只查同目录文件;文件与目录同名可共存,
+// 与 UniqueFileName 消解口径一致,改名不会制造上传消解的新分支)。
+func (db *DB) RenameFile(fileID int64, name string) error {
+	if name == "" || name == "." || name == ".." || strings.Contains(name, "/") {
+		return fmt.Errorf("index: 非法文件名 %q(需为单段,不含 \"/\",非 \".\"/\"..\")", name)
+	}
+	var folderID int64
+	var old string
+	err := db.QueryRow(
+		`SELECT folder_id, name FROM files WHERE id = ? AND deleted_at IS NULL`,
+		fileID).Scan(&folderID, &old)
+	if err != nil {
+		return fmt.Errorf("index: 文件 %d 不存在: %w", fileID, err)
+	}
+	if name == old {
+		return nil
+	}
+	return db.WithTx(func(tx *sql.Tx) error {
+		// 撞名在事务内复核:无 (folder_id,name) 唯一索引,这里挡常规并发窗口
+		taken, err := nameTakenTx(tx, folderID, name)
+		if err != nil {
+			return err
+		}
+		if taken {
+			return fmt.Errorf("index: 同目录已有同名文件 %q", name)
+		}
+		_, err = tx.Exec(`UPDATE files SET name = ? WHERE id = ?`, name, fileID)
+		return err
+	})
+}
+
 // SetUserMeta 设置用户自定义 JSON;JSON 合法性由上层保证,本层只存取。
 func (db *DB) SetUserMeta(id int64, metaJSON string) error {
 	return db.WithTx(func(tx *sql.Tx) error {

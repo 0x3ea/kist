@@ -528,6 +528,23 @@ export async function renameFolder(folderID: number, name: string): Promise<bool
   }
 }
 
+// 文件重命名:与目录同款纯索引零流量。详情面板若开着就同步改名,
+// 免得面板停留旧名(loadFolder 会经 index:changed 防抖刷新列表)
+export async function renameFile(fileID: number, name: string): Promise<boolean> {
+  try {
+    await API.RenameFile(fileID, name)
+    if (store.detail?.ID === fileID) {
+      store.detail.Name = name
+      store.detail.Path = store.detail.Path.slice(0, store.detail.Path.lastIndexOf('/') + 1) + name
+    }
+    toast('info', '已重命名')
+    return true
+  } catch (e) {
+    fail(e)
+    return false
+  }
+}
+
 export async function getFolderMeta(folderID: number): Promise<index.FolderMeta | null> {
   try {
     return await API.GetFolderMeta(folderID)

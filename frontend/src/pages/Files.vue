@@ -37,8 +37,8 @@ watch(
     query.value = ''
   },
 )
-// 重命名目标(TODO-19,仅目录):恰好选中一个目录时可用
-const renameTarget = ref<{ id: number; name: string } | null>(null)
+// 重命名目标(TODO-19 目录,文件同款接入):恰好选中一个条目时可用
+const renameTarget = ref<{ kind: 'folder' | 'file'; id: number; name: string } | null>(null)
 // 元数据对话框目标:目录(TODO-16)或文件(TODO-17),恰好选中一个时可用
 const metaTarget = ref<{ mode: 'folder' | 'file'; id: number; name: string; pack: boolean } | null>(null)
 
@@ -80,9 +80,15 @@ async function onDelete() {
 }
 
 function onRename() {
-  const id = [...store.folderSelection][0]
-  if (!id) return
-  renameTarget.value = { id, name: store.folder.entries.find((e) => e.ID === id)?.Name ?? '' }
+  // 目录与文件各取唯一选中:右键菜单/快捷路径都保证这里至多一个命中
+  const fid = [...store.folderSelection][0]
+  if (fid) {
+    renameTarget.value = { kind: 'folder', id: fid, name: store.folder.entries.find((e) => e.ID === fid)?.Name ?? '' }
+    return
+  }
+  const id = [...store.selection][0]
+  const e = store.folder.entries.find((x) => x.ID === id)
+  if (e) renameTarget.value = { kind: 'file', id, name: e.Name }
 }
 
 function onMeta() {
@@ -123,9 +129,8 @@ const ctxItems = computed<CtxItem[]>(() => {
   return [
     {
       label: '重命名',
-      // 后端 RenameFolder 只支持目录(TODO-19);文件重命名落地前保持禁用明示
-      disabled: !(nFolders === 1 && nFiles === 0),
-      title: nFolders === 1 && nFiles === 0 ? '' : '仅支持重命名单个目录(文件重命名尚未支持)',
+      disabled: !single,
+      title: single ? '' : '恰好选中一个条目时可用',
       action: onRename,
     },
     {
@@ -221,7 +226,8 @@ const ctxItems = computed<CtxItem[]>(() => {
     <NewFolderDialog v-if="showNewFolder" @close="showNewFolder = false" />
     <RenameDialog
       v-if="renameTarget"
-      :folder-i-d="renameTarget.id"
+      :kind="renameTarget.kind"
+      :id="renameTarget.id"
       :current-name="renameTarget.name"
       @close="renameTarget = null"
     />

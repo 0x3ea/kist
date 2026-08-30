@@ -1229,32 +1229,45 @@ func cmdMkdir(args []string) error {
 	return nil
 }
 
-// cmdRename 重命名目录(TODO-19):纯索引零流量,目录按 /路径 指认(与 meta 同款)。
-// 同名幂等 no-op;撞名报错不自动消解(索引层语义)。
+// cmdRename 重命名目录或文件:纯索引零流量。目录按 /路径 指认,文件按
+// uuid|id 指认(与 meta/rm/get 同款分派)。同名幂等 no-op;撞名报错不
+// 自动消解(索引层语义)。
 func cmdRename(args []string) error {
 	if len(args) != 2 {
-		return errs.New(errs.BadConfig, "用法:kistctl rename <目录路径> <新名>(如 kistctl rename /漫画库/作品A 新名字)")
+		return errs.New(errs.BadConfig, "用法:kistctl rename </目录路径|文件uuid|id> <新名>(如 kistctl rename /漫画库/作品A 新名字)")
 	}
 	db, err := openIndex()
 	if err != nil {
 		return err
 	}
 	defer db.Close()
-	segs, err := splitVirtualPath(args[0])
+	// "/" 开头是目录路径,否则视作文件 uuid|id(与 meta 同款分派)
+	if strings.HasPrefix(args[0], "/") {
+		segs, err := splitVirtualPath(args[0])
+		if err != nil {
+			return err
+		}
+		if len(segs) == 0 {
+			return errs.New(errs.BadConfig, "根目录不可重命名")
+		}
+		folderID, err := db.ResolveFolderPath(segs)
+		if err != nil {
+			return errs.From(err)
+		}
+		if err := db.RenameFolder(folderID, args[1]); err != nil {
+			return errs.From(err)
+		}
+		fmt.Printf("已重命名:%s → %s(纯索引零流量)\n", segs[len(segs)-1], args[1])
+		return nil
+	}
+	f, err := resolveTarget(db, args[0])
 	if err != nil {
 		return err
 	}
-	if len(segs) == 0 {
-		return errs.New(errs.BadConfig, "根目录不可重命名")
-	}
-	folderID, err := db.ResolveFolderPath(segs)
-	if err != nil {
+	if err := db.RenameFile(f.ID, args[1]); err != nil {
 		return errs.From(err)
 	}
-	if err := db.RenameFolder(folderID, args[1]); err != nil {
-		return errs.From(err)
-	}
-	fmt.Printf("已重命名:%s → %s(纯索引零流量)\n", segs[len(segs)-1], args[1])
+	fmt.Printf("已重命名:%s → %s(纯索引零流量)\n", f.Name, args[1])
 	return nil
 }
 
