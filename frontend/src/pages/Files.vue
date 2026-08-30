@@ -24,6 +24,7 @@ import NewFolderDialog from '../components/NewFolderDialog.vue'
 import RenameDialog from '../components/RenameDialog.vue'
 import ContextMenu, { type CtxItem } from '../components/ContextMenu.vue'
 import { humanSize } from '../format'
+import { fileKind, folderKind } from '../fileIcon'
 
 const query = ref('')
 const showMove = ref(false)
@@ -170,14 +171,14 @@ const ctxItems = computed<CtxItem[]>(() => {
       </div>
       <div class="search-list">
         <div v-for="f in store.search.folders" :key="'f' + f.ID" class="hit folder" @click="openSearchFolder(f.ID)">
-          <span class="kind">📁</span>
+          <span class="kind"><component :is="folderKind.icon" :size="15" :color="folderKind.color" /></span>
           <span class="name">{{ f.Name }}</span>
           <span class="dim">{{ f.Path }}</span>
           <span v-if="f.Note" class="dim note">{{ f.Note }}</span>
           <span v-for="t in f.Tags" :key="t" class="tag">#{{ t }}</span>
         </div>
         <div v-for="h in store.search.files" :key="h.ID" class="hit" @click="openDetail(h.ID)">
-          <span class="kind">📄</span>
+          <span class="kind"><component :is="fileKind(h.Name).icon" :size="15" :color="fileKind(h.Name).color" /></span>
           <span class="name">{{ h.Name }}</span>
           <span class="dim">{{ h.Path }}</span>
           <span class="dim size">{{ humanSize(h.Size) }}</span>
@@ -329,6 +330,15 @@ const ctxItems = computed<CtxItem[]>(() => {
 
 .hit:hover {
   background: var(--panel);
+}
+
+/* 类型图标列:SVG 与文字基线对齐会偏低,固定列宽 + 居中更稳 */
+.kind {
+  flex: 0 0 18px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  align-self: center;
 }
 
 .hit.folder .name {

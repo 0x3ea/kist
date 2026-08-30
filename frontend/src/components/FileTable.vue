@@ -1,9 +1,10 @@
 <script setup lang="ts">
 // FileTable.vue — 列表视图:目录行显示子树摘要(CLI ls 同款),文件行显示
-// 大小/时间/状态;P=pack(一话一对象)F=普通文件,uploading 标"待上传"。
+// 大小/时间/状态;类型列用共享 fileKind 图标,uploading 标"待上传"。
 import { index } from '../../wailsjs/go/models'
 import { store, summaryText, openDetail } from '../store'
 import { humanSize, shortTime } from '../format'
+import { fileKind, folderKind } from '../fileIcon'
 
 defineEmits<{ open: [id: number]; menu: [e: MouseEvent, entry: index.Entry] }>()
 
@@ -55,7 +56,13 @@ function stateTag(e: index.Entry): string {
             @change="e.IsFolder ? toggleFolder(e.ID) : toggleFile(e.ID)"
           />
         </td>
-        <td class="c-kind">{{ e.IsFolder ? '📁' : e.Pack ? 'P' : 'F' }}</td>
+        <td class="c-kind">
+          <component
+            :is="e.IsFolder ? folderKind.icon : fileKind(e.Name, e.Pack).icon"
+            :size="15"
+            :color="e.IsFolder ? folderKind.color : fileKind(e.Name, e.Pack).color"
+          />
+        </td>
         <td class="c-name">
           <span v-if="e.IsFolder" class="link" @click.stop="$emit('open', e.ID)">{{ e.Name }}</span>
           <template v-else>{{ e.Name }}</template>

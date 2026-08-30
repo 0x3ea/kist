@@ -7,6 +7,7 @@
 import { index } from '../../wailsjs/go/models'
 import { store, ensureThumb, openDetail, summaryText } from '../store'
 import { humanSize } from '../format'
+import { fileKind } from '../fileIcon'
 import CoverMosaic from './CoverMosaic.vue'
 import { onBeforeUnmount, onMounted } from 'vue'
 
@@ -82,10 +83,18 @@ function cardClick(e: index.Entry) {
         @click.stop="e.IsFolder ? (store.folderSelection.has(e.ID) ? store.folderSelection.delete(e.ID) : store.folderSelection.add(e.ID)) : toggleFile(e.ID)"
       >
       </span>
-      <CoverMosaic v-if="e.IsFolder" :ids="store.folder.summaries[String(e.ID)]?.CoverFileIDs ?? []" :name="e.Name" />
+      <CoverMosaic v-if="e.IsFolder" :ids="store.folder.summaries[String(e.ID)]?.CoverFileIDs ?? []" />
       <div v-else class="thumb">
         <img v-if="store.thumbs.get(e.ID)" :src="store.thumbs.get(e.ID)" alt="" />
-        <div v-else class="file-type" :class="{ pack: e.Pack }">{{ e.Pack ? '📦' : '📄' }}</div>
+        <!-- 无缩略图:按扩展名给类型图标(pack = 目录打包物,独立于普通文件) -->
+        <component
+          :is="fileKind(e.Name, e.Pack).icon"
+          v-else
+          class="file-type"
+          :size="44"
+          :stroke-width="1.5"
+          :color="fileKind(e.Name, e.Pack).color"
+        />
       </div>
       <div class="name" :title="e.Name">
         {{ e.Name }}
@@ -166,8 +175,7 @@ function cardClick(e: index.Entry) {
 }
 
 .file-type {
-  font-size: 40px;
-  opacity: 0.6;
+  opacity: 0.85;
 }
 
 .name {

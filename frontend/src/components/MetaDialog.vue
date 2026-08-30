@@ -16,6 +16,7 @@ import {
   setFileCover,
   store,
 } from '../store'
+import { fileKind } from '../fileIcon'
 
 const props = defineProps<{
   mode: 'folder' | 'file'
@@ -132,7 +133,14 @@ async function onClearCover() {
       <div v-else class="cover-row">
         <div class="cover-box">
           <img v-if="coverURL" :src="coverURL" alt="" />
-          <div v-else class="cover-empty">{{ pack ? '📦' : '📄' }}</div>
+          <component
+            :is="fileKind(name, pack).icon"
+            v-else
+            class="cover-empty"
+            :size="32"
+            :stroke-width="1.5"
+            :color="fileKind(name, pack).color"
+          />
         </div>
         <div class="cover-ops">
           <button :disabled="busy" @click="onImportCover">导入封面…</button>
@@ -232,8 +240,7 @@ textarea {
 }
 
 .cover-empty {
-  font-size: 36px;
-  opacity: 0.5;
+  opacity: 0.7;
 }
 
 .cover-ops {

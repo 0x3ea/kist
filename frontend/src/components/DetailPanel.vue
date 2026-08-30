@@ -4,6 +4,7 @@
 import { ref, watch } from 'vue'
 import { store, saveNote } from '../store'
 import { fullTime, humanSize } from '../format'
+import { fileKind } from '../fileIcon'
 
 const noteDraft = ref('')
 const saving = ref(false)
@@ -26,7 +27,14 @@ async function onSaveNote() {
   <aside v-if="store.detail" class="panel">
     <div class="thumb">
       <img v-if="store.thumbs.get(store.detail.ID)" :src="store.thumbs.get(store.detail.ID)" alt="" />
-      <div v-else class="no-thumb">{{ store.detail.Pack ? '📦' : '📄' }}</div>
+      <component
+        :is="fileKind(store.detail.Name, store.detail.Pack).icon"
+        v-else
+        class="no-thumb"
+        :size="56"
+        :stroke-width="1.25"
+        :color="fileKind(store.detail.Name, store.detail.Pack).color"
+      />
     </div>
     <h3 :title="store.detail.Name">{{ store.detail.Name }}</h3>
     <p class="path">{{ store.detail.Path }}</p>
@@ -85,8 +93,7 @@ async function onSaveNote() {
 }
 
 .no-thumb {
-  font-size: 48px;
-  opacity: 0.5;
+  opacity: 0.75;
 }
 
 h3 {
