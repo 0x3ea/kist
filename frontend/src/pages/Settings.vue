@@ -17,6 +17,7 @@ import {
   saveDrive,
   saveSettings,
   testConnection,
+  askConfirm,
   type DriveForm,
 } from '../store'
 import { fullTime } from '../format'
@@ -76,15 +77,25 @@ async function onSaveDrive() {
 }
 
 async function onDeleteDrive(d: main.DriveInfo) {
-  if (!confirm(`删除档案「${d.Name}」?\n远端数据不动;本地索引文件保留在 KIST_HOME 下(index-${d.ID}.db)。`)) return
+  if (
+    !(await askConfirm({
+      title: '删除档案',
+      message: `删除档案「${d.Name}」?\n远端数据不动;本地索引文件保留在 KIST_HOME 下(index-${d.ID}.db)。`,
+      danger: true,
+      confirmText: '删除',
+    }))
+  )
+    return
   await deleteDrive(d.ID)
 }
 
 async function onActivateDrive(d: main.DriveInfo) {
   if (
-    !confirm(
-      `切换到「${d.Name}」?\n当前盘落后的索引会先补一次备份;有在途传输时切换会被拒绝;切换后文件列表换成本盘的库(口令不变,无需重新解锁)。`,
-    )
+    !(await askConfirm({
+      title: '切换网盘',
+      message: `切换到「${d.Name}」?\n当前盘落后的索引会先补一次备份;有在途传输时切换会被拒绝;切换后文件列表换成本盘的库(口令不变,无需重新解锁)。`,
+      confirmText: '切换',
+    }))
   )
     return
   await activateDrive(d.ID)
@@ -136,7 +147,15 @@ async function onRunGC() {
   if (!gc.value) return
   const n = gc.value.TrashOrDeleted?.length ?? 0
   if (n === 0) return
-  if (!confirm(`确认删除远端 ${n} 个已标记的 blob?此操作不可撤销。`)) return
+  if (
+    !(await askConfirm({
+      title: '孤儿清理',
+      message: `确认删除远端 ${n} 个已标记的 blob?此操作不可撤销。`,
+      danger: true,
+      confirmText: '删除',
+    }))
+  )
+    return
   if (await runGC()) gc.value = null
 }
 

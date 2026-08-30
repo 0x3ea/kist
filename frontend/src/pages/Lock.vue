@@ -6,7 +6,7 @@
 //   3) 已配置且无本地 keyfile → 新设备,直接"从远端恢复"(ImportFromRemote)
 import { computed, reactive, ref, watch } from 'vue'
 import { main } from '../../wailsjs/go/models'
-import { store, createAccount, importFromRemote, saveWebDAVConfig, testConnection, unlock } from '../store'
+import { store, createAccount, importFromRemote, saveWebDAVConfig, askConfirm, testConnection, unlock } from '../store'
 
 const state = store.state
 
@@ -56,7 +56,14 @@ async function onSaveDav() {
   if (!r.Ok) return
   if (await saveWebDAVConfig(dav)) {
     // 本地库非空(换网盘目录复用旧数据)会让新账户混账——确认后再继续
-    if (state.FileCount > 0 && !confirm(`本地索引已有 ${state.FileCount} 个文件。\n在此网盘上新建账户不会清除它们,但列表会混合两个来源的数据。继续吗?`)) {
+    if (
+      state.FileCount > 0 &&
+      !(await askConfirm({
+        title: '本地索引非空',
+        message: `本地索引已有 ${state.FileCount} 个文件。\n在此网盘上新建账户不会清除它们,但列表会混合两个来源的数据。继续吗?`,
+        confirmText: '继续',
+      }))
+    ) {
       return
     }
     step.value = 'passphrase'

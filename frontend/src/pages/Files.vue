@@ -14,6 +14,7 @@ import {
   downloadSelected,
   deleteEntries,
   openDetail,
+  askConfirm,
 } from '../store'
 import FileTable from '../components/FileTable.vue'
 import CardGrid from '../components/CardGrid.vue'
@@ -66,7 +67,15 @@ async function onDelete() {
   const n = selTotal.value
   if (n === 0) return
   const extra = store.folderSelection.size > 0 ? '\n注意:目录只从列表隐藏,其内文件需逐个删除后由「孤儿清理」回收远端空间。' : ''
-  if (!confirm(`删除 ${n} 个条目?${extra}`)) return
+  if (
+    !(await askConfirm({
+      title: '删除条目',
+      message: `删除 ${n} 个条目?${extra}`,
+      danger: true,
+      confirmText: '删除',
+    }))
+  )
+    return
   await deleteEntries()
 }
 

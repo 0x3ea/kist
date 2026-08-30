@@ -20,6 +20,43 @@ export interface Toast {
 let toastSeq = 0
 let searchTimer: ReturnType<typeof setTimeout> | null = null
 
+// ---- 自绘确认框(替代原生 confirm:样式割裂、标题写死、按钮文案不可控)----
+// App.vue 挂载一次 ConfirmDialog;askConfirm 返回 Promise,调用方 await 后
+// 按返回值分支,与原 confirm() 同形。
+
+export const confirmState = reactive<{
+  open: boolean
+  title: string
+  message: string
+  danger: boolean // 危险动作:确认键红色强调
+  confirmText: string
+  resolve: ((ok: boolean) => void) | null
+}>({ open: false, title: '', message: '', danger: false, confirmText: '确定', resolve: null })
+
+export function askConfirm(opts: {
+  title: string
+  message: string
+  danger?: boolean
+  confirmText?: string
+}): Promise<boolean> {
+  return new Promise((resolve) => {
+    confirmState.title = opts.title
+    confirmState.message = opts.message
+    confirmState.danger = opts.danger ?? false
+    confirmState.confirmText = opts.confirmText ?? '确定'
+    confirmState.resolve = resolve
+    confirmState.open = true
+  })
+}
+
+/** ConfirmDialog 的两个出口(按钮/Esc/Enter)都经这里结算,防重复 resolve */
+export function settleConfirm(ok: boolean) {
+  if (!confirmState.open) return
+  confirmState.open = false
+  confirmState.resolve?.(ok)
+  confirmState.resolve = null
+}
+
 export const store = reactive({
   /** 后端 app:state 快照(startup 事件早于订阅会丢,init 主动拉) */
   state: { Configured: false, Unlocked: false, FileCount: 0, HasLocalKeyfile: false, DriveName: '', DriveCount: 0 },

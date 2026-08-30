@@ -7,6 +7,7 @@
 import { onMounted, ref } from 'vue'
 import { index } from '../../wailsjs/go/models'
 import {
+  askConfirm,
   ensureThumb,
   getFileMeta,
   getFolderMeta,
@@ -99,7 +100,17 @@ async function onSave() {
 }
 
 async function onImportCover() {
-  if (props.pack && coverURL.value && !confirm('将替换 pack 自动生成的首页封面(清除后不恢复),继续?')) return
+  if (
+    props.pack &&
+    coverURL.value &&
+    !(await askConfirm({
+      title: '替换封面',
+      message: '将替换 pack 自动生成的首页封面(清除后不恢复),继续?',
+      danger: true,
+      confirmText: '替换',
+    }))
+  )
+    return
   const path = await pickImageFile()
   if (!path) return
   if (await setFileCover(props.id, path)) refreshCover()
@@ -108,7 +119,15 @@ async function onImportCover() {
 async function onClearCover() {
   if (!coverURL.value) return
   const extra = props.pack ? 'pack 的自动首页封面不会恢复,' : ''
-  if (!confirm(`清除封面?${extra}该文件将回落类型占位图。`)) return
+  if (
+    !(await askConfirm({
+      title: '清除封面',
+      message: `清除封面?${extra}该文件将回落类型占位图。`,
+      danger: props.pack, // 普通封面可随时重导;pack 自动首页顶掉后不可恢复
+      confirmText: '清除',
+    }))
+  )
+    return
   if (await setFileCover(props.id, '')) refreshCover()
 }
 </script>
