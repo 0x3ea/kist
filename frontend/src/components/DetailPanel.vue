@@ -78,6 +78,9 @@ async function onSaveNote() {
 
 .thumb {
   aspect-ratio: 2 / 3;
+  /* 禁止参与 flex 压缩:面板内容超高时缩略图盒会被沿主轴压扁,
+     cover 裁出扁条;宁可靠面板滚动保住 2:3 */
+  flex-shrink: 0;
   border-radius: 8px;
   overflow: hidden;
   background: var(--panel-2);
