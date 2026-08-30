@@ -38,7 +38,7 @@ const hue = computed(() => {
 <style scoped>
 .mosaic {
   width: 100%;
-  aspect-ratio: 1;
+  aspect-ratio: 2 / 3;
   display: grid;
   gap: 2px;
   overflow: hidden;
@@ -46,14 +46,15 @@ const hue = computed(() => {
   background: var(--panel-2);
 }
 
-/* 单值满铺(自定义封面);2×2 / 1×2 网格按数量均分 */
+/* 单值满铺(自定义封面);2 横排 / 3-4 2×2 网格按数量均分。
+   容器已改 2:3 竖版:2 格若左右排会切成 1:3 细条,故改上下两行(每格≈4:3) */
 .mosaic.n1,
 .mosaic.none {
   grid-template-columns: 1fr;
 }
 
 .mosaic.n2 {
-  grid-template-columns: 1fr 1fr;
+  grid-template-rows: 1fr 1fr;
 }
 
 .mosaic.n3,

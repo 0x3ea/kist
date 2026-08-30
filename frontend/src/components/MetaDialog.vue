@@ -215,7 +215,7 @@ textarea {
 
 .cover-box {
   width: 96px;
-  aspect-ratio: 1;
+  aspect-ratio: 2 / 3;
   border-radius: 8px;
   overflow: hidden;
   background: var(--panel-2);

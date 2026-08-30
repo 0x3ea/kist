@@ -150,7 +150,7 @@ function cardClick(e: index.Entry) {
 }
 
 .thumb {
-  aspect-ratio: 1;
+  aspect-ratio: 2 / 3;
   border-radius: 6px;
   overflow: hidden;
   background: var(--panel-2);
