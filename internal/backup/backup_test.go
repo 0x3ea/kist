@@ -46,7 +46,9 @@ func setupDevice(t *testing.T, srvURL string) (home string, store *remote.Store,
 	t.Helper()
 	home = t.TempDir()
 	t.Setenv("KIST_HOME", home)
-	if err := config.Save(&config.StoredConfig{URL: srvURL, Username: "u", Password: "p"}); err != nil {
+	cfg := &config.StoredConfig{}
+	cfg.Drives = append(cfg.Drives, config.Drive{URL: srvURL, Username: "u", Password: "p"})
+	if err := config.Save(cfg); err != nil {
 		t.Fatal(err)
 	}
 	dc, err := dav.New(dav.Config{URL: srvURL, Username: "u", Password: "p"})
@@ -54,7 +56,7 @@ func setupDevice(t *testing.T, srvURL string) (home string, store *remote.Store,
 		t.Fatal(err)
 	}
 	store = remote.NewStore(dc, "/kist")
-	db, err = index.Open(config.IndexPath())
+	db, err = index.Open(config.DriveIndexPath(cfg.Drives[0].ID))
 	if err != nil {
 		t.Fatal(err)
 	}

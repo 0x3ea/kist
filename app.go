@@ -14,6 +14,8 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
+	"path/filepath"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -73,36 +75,11 @@ func (a *App) startup(ctx context.Context) {
 		slog.Error("读取 config.json 失败", "err", err)
 	} else {
 		a.cfg = cfg
-		if a.cfg.URL != "" && a.cfg.Username != "" {
-			a.rebuildStoreLocked()
+		if a.cfg.ActiveDrive() != nil {
+			// 有活动盘才开库:库文件名锚定盘 ID,旧单库文件在此随迁(TODO-21)。
+			// 未配置(无任何盘)时 db/mgr 保持 nil,首配在 SaveDrive 里补开。
+			a.reopenVaultLocked()
 		}
-	}
-	if db, err := index.Open(config.IndexPath()); err != nil {
-		slog.Error("打开索引库失败", "err", err)
-	} else {
-		a.db = db
-	}
-	if a.db != nil {
-		// MK 闭包读解锁态:未解锁返回 false,任务以 errs.Locked 失败(push 类纯密文
-		// 任务不取 key,不受影响)。Concurrency/ChunkMiB/NoPad 每轮重读,改设置即时生效。
-		a.mgr = transfer.NewManager(transfer.Deps{
-			Remote:      a.storeSnapshot(),
-			DB:          a.db,
-			MK:          a.mkSnapshot,
-			Concurrency: a.settingInt(func(s config.Settings) int { return s.Concurrency }),
-			ChunkMiB:    a.settingInt(func(s config.Settings) int { return s.ChunkMiB }),
-			NoPad: func() bool {
-				a.mu.Lock()
-				defer a.mu.Unlock()
-				return a.cfg != nil && a.cfg.Settings.SizePadding == "off"
-			},
-			PushFailDiscard: func() bool {
-				a.mu.Lock()
-				defer a.mu.Unlock()
-				return a.cfg != nil && a.cfg.Settings.OutboxPushFail == "discard"
-			},
-			Emit: a.onTransferEvent,
-		})
 	}
 	wruntime.EventsEmit(ctx, "app:state", a.GetAppState())
 }
@@ -175,24 +152,123 @@ func (a *App) panicGuard(errp *error) {
 
 // ---- 组装与解锁态 helper(cmd/kistctl 同款逻辑的 GUI 版) ----
 
-// buildStore 由配置装配远端存储(loadStore 的核心步骤)。
-func buildStore(cfg *config.StoredConfig) (*remote.Store, error) {
-	c, err := dav.New(dav.Config{URL: cfg.URL, Username: cfg.Username, Password: cfg.Password, RootPath: cfg.RootPath})
+// buildStore 由盘档案装配远端存储(loadStore 的核心步骤)。
+func buildStore(d *config.Drive) (*remote.Store, error) {
+	c, err := dav.New(dav.Config{URL: d.URL, Username: d.Username, Password: d.Password, RootPath: d.RootPath})
 	if err != nil {
 		return nil, errs.Wrap(errs.BadConfig, err)
 	}
-	return remote.NewStore(c, cfg.RootPath), nil
+	return remote.NewStore(c, d.RootPath), nil
 }
 
-// rebuildStoreLocked 按当前 cfg 重建 store;调用方须持 mu。
-func (a *App) rebuildStoreLocked() {
-	store, err := buildStore(a.cfg)
-	if err != nil {
-		slog.Error("远端客户端装配失败", "err", err)
+// reopenVaultLocked 装配活动盘三件套:关旧库 → 索引文件随迁(幂等)→ 开新库 →
+// 重建 store 与传输管线。换盘/首配/开新库都走这里。
+// 并发纪律:调用方须持 mu,且保证管线空闲(mgr 为 nil 或 Idle)——mgr 的 DB 是
+// 直接引用,不做热换,换库必重建。
+func (a *App) reopenVaultLocked() {
+	if a.backupTimer != nil {
+		a.backupTimer.Stop()
+		a.backupTimer = nil
+	}
+	a.mgr = nil // 旧管线引用旧库句柄,必须随库重建
+	if a.db != nil {
+		a.db.Close()
+		a.db = nil
+	}
+	d := a.cfg.ActiveDrive()
+	if d == nil {
 		a.store = nil
 		return
 	}
+	if err := index.MigrateIndexFile(config.LegacyIndexPath(), config.DriveIndexPath(d.ID)); err != nil {
+		slog.Error("索引文件随迁失败", "err", err)
+	}
+	db, err := index.Open(config.DriveIndexPath(d.ID))
+	if err != nil {
+		slog.Error("打开索引库失败", "err", err)
+		a.store = nil
+		return
+	}
+	a.db = db
+	a.rebuildStoreLocked()
+	a.buildMgrLocked()
+	a.lastBackupRev = 0 // 基线随库重设
+	if rev, rerr := db.Revision(); rerr == nil {
+		a.lastBackupRev = rev
+	}
+}
+
+// archiveLocalIndexLocked 把活动盘的本地索引文件归档到 backups/(开新库前的
+// 清场:旧文件可能是上一任库的行,不能混入新库)。库为空时不动文件返回空串;
+// 归档失败返回错误(调用方沿用原文件开库,仅告警)。调用方须持 mu 且管线空闲;
+// 调用后应 reopenVaultLocked。
+func (a *App) archiveLocalIndexLocked() (string, error) {
+	if a.db == nil || a.cfg == nil {
+		return "", nil
+	}
+	d := a.cfg.ActiveDrive()
+	if d == nil {
+		return "", nil
+	}
+	if s, err := a.db.FolderSummary(1); err == nil && s.FileCount == 0 && s.PendingCount == 0 {
+		return "", nil // 空库直接复用文件,不值得归档
+	}
+	src := config.DriveIndexPath(d.ID)
+	if err := a.db.Close(); err != nil {
+		return "", err
+	}
+	a.db = nil
+	bdir := config.BackupDir()
+	if err := os.MkdirAll(bdir, 0o700); err != nil {
+		return "", err
+	}
+	dst := filepath.Join(bdir, fmt.Sprintf("index-%s-%d.db", d.ID, time.Now().Unix()))
+	if err := os.Rename(src, dst); err != nil {
+		return "", err
+	}
+	return dst, nil
+}
+
+// rebuildStoreLocked 按活动盘重建 store;调用方须持 mu。
+func (a *App) rebuildStoreLocked() {
+	a.store = nil
+	d := a.cfg.ActiveDrive()
+	if d == nil {
+		return
+	}
+	store, err := buildStore(d)
+	if err != nil {
+		slog.Error("远端客户端装配失败", "err", err)
+		return
+	}
 	a.store = store
+}
+
+// buildMgrLocked 按当前 db/store 构建传输管线;无库不构建。
+func (a *App) buildMgrLocked() {
+	if a.db == nil {
+		return
+	}
+	// MK 闭包读解锁态:未解锁返回 false,任务以 errs.Locked 失败(push 类纯密文
+	// 任务不取 key,不受影响)。Concurrency/ChunkMiB/NoPad 每轮重读,改设置即时生效。
+	a.mgr = transfer.NewManager(transfer.Deps{
+		Remote:      a.store,
+		DB:          a.db,
+		MK:          a.mkSnapshot,
+		Concurrency: a.settingInt(func(s config.Settings) int { return s.Concurrency }),
+		ChunkMiB:    a.settingInt(func(s config.Settings) int { return s.ChunkMiB }),
+		NoPad: func() bool {
+			a.mu.Lock()
+			defer a.mu.Unlock()
+			return a.cfg != nil && a.cfg.Settings.SizePadding == "off"
+		},
+		PushFailDiscard: func() bool {
+			a.mu.Lock()
+			defer a.mu.Unlock()
+			return a.cfg != nil && a.cfg.Settings.OutboxPushFail == "discard"
+		},
+		Emit: a.onTransferEvent,
+	})
 }
 
 // storeSnapshot 取当前 store 指针(可能为 nil)。
@@ -240,7 +316,7 @@ func (a *App) requireDB() (*index.DB, error) {
 func (a *App) requireStore() (*remote.Store, error) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
-	if a.cfg == nil || a.cfg.URL == "" || a.cfg.Username == "" {
+	if a.cfg == nil || !a.cfg.Configured() {
 		return nil, errs.New(errs.NotConfigured, "尚未配置网盘:请先在向导或设置里填写 WebDAV 配置")
 	}
 	if a.store == nil {
@@ -408,11 +484,14 @@ func (a *App) runAutoBackup() {
 
 // AppState 启动/解锁状态快照;HasLocalKeyfile 供 Lock 页分支:
 // 已配置 + 无本地 keyfile = 新设备,显示"从远端恢复"入口。
+// DriveName/DriveCount 供 Lock/设置页展示当前库所在盘(TODO-21)。
 type AppState struct {
 	Configured      bool
 	Unlocked        bool
 	FileCount       int
 	HasLocalKeyfile bool
+	DriveName       string
+	DriveCount      int
 }
 
 // GetAppState 无错误返回:前端启动即拉,失败信息进不了 promise reject。
@@ -421,8 +500,14 @@ func (a *App) GetAppState() AppState {
 	cfg, unlocked := a.cfg, a.unlocked
 	a.mu.Unlock()
 	st := AppState{Unlocked: unlocked}
-	if cfg != nil && cfg.URL != "" && cfg.Username != "" {
-		st.Configured = true
+	if cfg != nil {
+		if cfg.Configured() {
+			st.Configured = true
+		}
+		if d := cfg.ActiveDrive(); d != nil {
+			st.DriveName = d.Name
+			st.DriveCount = len(cfg.Drives)
+		}
 	}
 	if _, err := os.Stat(config.KeyFilePath()); err == nil {
 		st.HasLocalKeyfile = true
@@ -440,33 +525,107 @@ type WebDAVConfig struct {
 	RememberPassword bool
 }
 
-// GetWebDAVConfig 回显当前配置(密码仅"记住密码"时才有值,否则不猜)。
+// GetWebDAVConfig 回显活动盘配置(密码仅"记住密码"时才有值,否则不猜)。
 func (a *App) GetWebDAVConfig() WebDAVConfig {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	if a.cfg == nil {
 		return WebDAVConfig{RootPath: "/kist"}
 	}
-	c := WebDAVConfig{
-		URL:              a.cfg.URL,
-		Username:         a.cfg.Username,
-		RootPath:         a.cfg.RootPath,
-		RememberPassword: a.cfg.Settings.RememberPassword,
-	}
-	if c.RootPath == "" {
-		c.RootPath = "/kist"
-	}
-	if a.cfg.Settings.RememberPassword {
-		c.Password = a.cfg.Password
+	c := WebDAVConfig{RootPath: "/kist"}
+	if d := a.cfg.ActiveDrive(); d != nil {
+		c = WebDAVConfig{
+			URL:              d.URL,
+			Username:         d.Username,
+			RootPath:         d.RootPath,
+			RememberPassword: d.RememberPassword,
+		}
+		if c.RootPath == "" {
+			c.RootPath = "/kist"
+		}
+		if d.RememberPassword {
+			c.Password = d.Password
+		}
 	}
 	return c
 }
 
-// SaveWebDAVConfig 保存网盘配置并重建远端客户端。密码是否落盘由
-// RememberPassword 决定(config.Save 统一处理,未勾选时清空不落盘)。
-func (a *App) SaveWebDAVConfig(c WebDAVConfig) (err error) {
+// SaveWebDAVConfig 兼容入口(首配向导用):写活动盘,无盘则建第一盘。
+// 名称留空由 normalize 兜底为 URL host;密码落盘与否走 SaveDrive 同一逻辑。
+func (a *App) SaveWebDAVConfig(c WebDAVConfig) error {
+	a.mu.Lock()
+	id := ""
+	if a.cfg != nil {
+		if d := a.cfg.ActiveDrive(); d != nil {
+			id = d.ID
+		}
+	}
+	a.mu.Unlock()
+	return a.SaveDrive(DriveInput{
+		ID:               id,
+		URL:              c.URL,
+		Username:         c.Username,
+		Password:         c.Password,
+		RootPath:         c.RootPath,
+		RememberPassword: c.RememberPassword,
+	})
+}
+
+// DriveInfo 档案列表条目;密码仅"记住密码"时回显(编辑表单预填用)。
+type DriveInfo struct {
+	ID               string
+	Name             string
+	URL              string
+	Username         string
+	RootPath         string
+	RememberPassword bool
+	Password         string
+	Active           bool
+}
+
+// ListDrives 列出全部网盘档案(设置页列表)。
+func (a *App) ListDrives() []DriveInfo {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if a.cfg == nil {
+		return []DriveInfo{}
+	}
+	out := make([]DriveInfo, 0, len(a.cfg.Drives))
+	for _, d := range a.cfg.Drives {
+		di := DriveInfo{
+			ID:               d.ID,
+			Name:             d.Name,
+			URL:              d.URL,
+			Username:         d.Username,
+			RootPath:         d.RootPath,
+			RememberPassword: d.RememberPassword,
+			Active:           d.ID == a.cfg.Active,
+		}
+		if d.RememberPassword {
+			di.Password = d.Password
+		}
+		out = append(out, di)
+	}
+	return out
+}
+
+// DriveInput 档案新增/编辑表单;ID 空 = 新增。
+type DriveInput struct {
+	ID               string
+	Name             string
+	URL              string
+	Username         string
+	Password         string
+	RootPath         string
+	RememberPassword bool
+}
+
+// SaveDrive 新增或编辑网盘档案。编辑活动盘时重建远端客户端并热更新管线端点;
+// 库文件锚定盘 ID,编辑凭据/改名不动库。密码是否落盘由 RememberPassword 决定
+// (config.Save 逐盘处理,未勾选时清空不落盘)。
+func (a *App) SaveDrive(in DriveInput) (err error) {
 	defer a.panicGuard(&err)
-	if c.URL == "" || c.Username == "" {
+	if in.URL == "" || in.Username == "" {
 		return a.wrap(errs.New(errs.BadConfig, "URL 与用户名均为必填"))
 	}
 	a.mu.Lock()
@@ -474,25 +633,150 @@ func (a *App) SaveWebDAVConfig(c WebDAVConfig) (err error) {
 	if cfg == nil {
 		cfg = &config.StoredConfig{}
 	}
-	cfg.URL, cfg.Username = c.URL, c.Username
-	cfg.RootPath = c.RootPath // 空值由 config.Save 的 normalize 补 /kist
-	cfg.Password = c.Password
-	cfg.Settings.RememberPassword = c.RememberPassword
+	// 校验在工作副本上做,通过后一次落子——cfg 与 a.cfg 是同一对象,
+	// 边改边查会让被拒绝的输入残留在活配置里(实测踩过:查重拒绝的
+	// 档案已 append 进切片,后续查重被它误伤)
+	work := *cfg
+	work.Drives = append([]config.Drive(nil), cfg.Drives...)
+	var d *config.Drive
+	if in.ID == "" {
+		work.Drives = append(work.Drives, config.Drive{ID: config.NewDriveID()})
+		d = &work.Drives[len(work.Drives)-1]
+	} else {
+		d = work.DriveByID(in.ID)
+		if d == nil {
+			a.mu.Unlock()
+			return a.wrap(errs.New(errs.BadConfig, "网盘档案不存在:可能已被删除,请刷新列表"))
+		}
+	}
+	d.Name = in.Name
+	d.URL, d.Username = in.URL, in.Username
+	d.RootPath = in.RootPath // 空值由 config.Save 的 normalize 补 /kist
+	d.Password = in.Password
+	d.RememberPassword = in.RememberPassword
+	// 查重必须在字段落位之后(比对的是新值,不是空壳)
+	if dup := work.FindDuplicate(d); dup != nil {
+		a.mu.Unlock()
+		return a.wrap(errs.New(errs.BadConfig,
+			fmt.Sprintf("与档案「%s」同地址/用户名/根目录——两个档案会指向同一个库,互相覆盖备份", dup.Name)))
+	}
+	if serr := config.Save(&work); serr != nil {
+		a.mu.Unlock()
+		return a.wrap(serr)
+	}
+	*cfg = work
+	a.cfg = cfg // 首配时 a.cfg 原为 nil,这里统一认领
+	wasActive := d.ID == cfg.Active
+	firstVault := wasActive && a.db == nil // 首个档案:库还没开过
+	if wasActive {
+		if firstVault {
+			a.reopenVaultLocked() // 开库 + 建管线(store 也在内)
+		} else {
+			a.rebuildStoreLocked()
+		}
+	}
+	store := a.store
+	a.mu.Unlock()
+	// 管线热更新端点(mgr.SetRemote);在 a.mu 外调用——worker 的 Emit 回调会
+	// 反向拿 a.mu,锁内互嵌会构成 ABBA。
+	if wasActive && !firstVault && a.mgr != nil && store != nil {
+		a.mgr.SetRemote(store)
+	}
+	a.emitState()
+	return nil
+}
+
+// DeleteDrive 删除网盘档案(非活动、非最后一个)。本地索引文件保留——
+// 上面可能是整库的明文索引,宁可落灰也不静默删。
+func (a *App) DeleteDrive(id string) (err error) {
+	defer a.panicGuard(&err)
+	a.mu.Lock()
+	cfg := a.cfg
+	if cfg == nil || cfg.DriveByID(id) == nil {
+		a.mu.Unlock()
+		return a.wrap(errs.New(errs.BadConfig, "网盘档案不存在:可能已被删除,请刷新列表"))
+	}
+	if id == cfg.Active {
+		a.mu.Unlock()
+		return a.wrap(errs.New(errs.BadConfig, "不能删除当前网盘:请先切换到其他网盘"))
+	}
+	if len(cfg.Drives) <= 1 {
+		a.mu.Unlock()
+		return a.wrap(errs.New(errs.BadConfig, "至少保留一个网盘档案"))
+	}
+	name := cfg.DriveByID(id).Name
+	kept := make([]config.Drive, 0, len(cfg.Drives)-1)
+	for _, d := range cfg.Drives {
+		if d.ID != id {
+			kept = append(kept, d)
+		}
+	}
+	cfg.Drives = kept
 	if serr := config.Save(cfg); serr != nil {
 		a.mu.Unlock()
 		return a.wrap(serr)
 	}
 	a.cfg = cfg
-	a.rebuildStoreLocked()
-	store := a.store
 	a.mu.Unlock()
-	// 管线热更新端点(mgr.SetRemote);在 a.mu 外调用——worker 的 Emit 回调会
-	// 反向拿 a.mu,锁内互嵌会构成 ABBA。向导首配时 mgr 的 Remote 还是 nil,
-	// 也靠这里补上。
-	if a.mgr != nil && store != nil {
-		a.mgr.SetRemote(store)
-	}
+	a.emitNotify("info", fmt.Sprintf("已删除档案「%s」(本地索引文件保留在 %s)", name, config.DriveIndexPath(id)))
 	a.emitState()
+	return nil
+}
+
+// SetActiveDrive 切换当前库(TODO-21 核心):要求管线空闲;切走前旧盘
+// 尽力而为补一次备份;切换后保持解锁态(共用 keyfile,同一把 MK),
+// 前端收到 drive:switched 回根目录。
+func (a *App) SetActiveDrive(id string) (err error) {
+	defer a.panicGuard(&err)
+	a.mu.Lock()
+	cfg := a.cfg
+	if cfg == nil || cfg.DriveByID(id) == nil {
+		a.mu.Unlock()
+		return a.wrap(errs.New(errs.BadConfig, "网盘档案不存在:可能已被删除,请刷新列表"))
+	}
+	if id == cfg.Active {
+		a.mu.Unlock()
+		return nil // 幂等
+	}
+	if a.mgr == nil || !a.mgr.Idle() {
+		a.mu.Unlock()
+		return a.wrap(errs.New(errs.Busy, "有传输任务进行中:请等待完成或取消后再切换网盘"))
+	}
+	// 切走前补备份:快照后放锁执行(BackupNow 是秒级网络操作,不捂 mu)。
+	// 字段直读——mkSnapshot 内部也拿 a.mu,持锁时调用会自锁。
+	snapUnlocked := a.unlocked
+	snapDB, snapStore := a.db, a.store
+	snapMK := a.mk
+	snapRev := a.lastBackupRev
+	a.mu.Unlock()
+	if snapUnlocked && snapDB != nil && snapStore != nil {
+		if rev, rerr := snapDB.Revision(); rerr == nil && rev > snapRev {
+			bctx, cancel := context.WithTimeout(context.Background(), backupTimeout)
+			if _, berr := backup.BackupNow(bctx, snapMK, snapDB, snapStore); berr != nil {
+				// 备份失败不拦切换:本地库文件还在,数据不丢,只是远端备份落后
+				slog.Warn("切换前备份失败(继续切换)", "err", berr)
+			}
+			cancel()
+		}
+	}
+	a.mu.Lock()
+	cfg.Active = id // 切换本体:库文件与管线都锚定活动盘 ID
+	if serr := config.Save(cfg); serr != nil {
+		a.mu.Unlock()
+		return a.wrap(serr)
+	}
+	a.cfg = cfg
+	a.reopenVaultLocked() // 关旧库开新库 + 重建管线;保持解锁态(MK 共用)
+	name := ""
+	if d := cfg.ActiveDrive(); d != nil {
+		name = d.Name
+	}
+	a.mu.Unlock()
+	a.emitState()
+	a.emitNotify("info", "已切换到网盘「"+name+"」")
+	if a.ctx != nil {
+		wruntime.EventsEmit(a.ctx, "drive:switched", map[string]string{"name": name})
+	}
 	return nil
 }
 
@@ -519,8 +803,10 @@ func (a *App) TestConnection(c WebDAVConfig) TestResult {
 	return TestResult{Ok: true, Detail: "连接正常"}
 }
 
-// CreateAccount 首次建账户(cmdInit 同款顺序:先远端后本地):
-// EnsureReady → 远端查重 → 生成 MK+keyfile → PUT 远端 → 本地缓存 → 置解锁态。
+// CreateAccount 首次建账户:EnsureReady → 远端查重 → 生成 MK+keyfile →
+// PUT 远端 → 本地缓存 → 置解锁态。本地已有 keyfile 时改为"开新库"分支
+// (推现有 keyfile,沿用口令与 MK,见 TODO-21)。
+// 顺序沿用 cmdInit:先远端后本地。
 func (a *App) CreateAccount(passphrase string) (err error) {
 	defer a.panicGuard(&err)
 	store, err := a.requireStore()
@@ -537,8 +823,40 @@ func (a *App) CreateAccount(passphrase string) (err error) {
 	}
 	if exists {
 		return a.wrap(errs.New(errs.BadConfig,
-			"远端已有 keyfile(此网盘目录已被初始化);如需重新开始请先手动清理远端目录"))
+			"远端已有 keyfile(此网盘目录已被初始化);请在解锁页解锁或从远端恢复"))
 	}
+	// 共用 keyfile(TODO-21):本地已有 keyfile = 在这块盘开新库——沿用现有
+	// 密钥与口令,绝不生成新 MK(多库共用 keyfile 的前提),口令不符即拒绝。
+	if local, lerr := os.ReadFile(config.KeyFilePath()); lerr == nil {
+		kf, kerr := crypto.ParseKeyFile(local)
+		if kerr != nil {
+			return a.wrap(errs.Wrap(errs.Corrupt, kerr))
+		}
+		mk, uerr := kf.Unlock(passphrase)
+		if uerr != nil {
+			return a.wrap(errs.From(uerr)) // AUTH_FAILED:开新库必须沿用现有口令
+		}
+		if err := store.PutKeyFile(ctx, local); err != nil {
+			return a.wrap(errs.Wrap(errs.DavError, err))
+		}
+		a.mu.Lock()
+		if a.mgr != nil && !a.mgr.Idle() {
+			a.mu.Unlock()
+			return a.wrap(errs.New(errs.Busy, "有传输任务进行中:请等待完成或取消后再开新库"))
+		}
+		archived, aerr := a.archiveLocalIndexLocked()
+		a.reopenVaultLocked() // 库文件已归档消失 → Open 得到全新空库
+		a.mu.Unlock()
+		a.setUnlocked(mk)
+		if aerr != nil {
+			slog.Warn("开新库:本地索引归档失败(沿用原文件)", "err", aerr)
+		} else if archived != "" {
+			a.emitNotify("info", "已在「"+a.cfg.ActiveDrive().Name+"」开新库;原本地索引归档于 "+archived)
+		}
+		a.emitState()
+		return nil
+	}
+	// 首次建库(本地无 keyfile):生成新密钥
 	kf, mk, err := crypto.CreateKeyFile(passphrase, crypto.DefaultArgon2Params())
 	if err != nil {
 		return a.wrap(errs.From(err))
@@ -643,12 +961,45 @@ func (a *App) ChangePassphrase(oldPass, newPass string) (err error) {
 	if err := kf.Rewrap(oldPass, newPass); err != nil {
 		return a.wrap(errs.From(err)) // 旧口令错 → AUTH_FAILED
 	}
-	if err := store.PutKeyFile(a.callCtx(), kf.Bytes()); err != nil {
-		return a.wrap(errs.Wrap(errs.DavError, err))
-	}
+	// 本地先行:本地 keyfile 是共用 keyfile 的母本
 	if err := os.WriteFile(config.KeyFilePath(), kf.Bytes(), 0o600); err != nil {
 		return a.wrap(err)
 	}
-	a.emitNotify("info", "口令已更改(旧口令即刻失效)")
+	// 多盘扇出(TODO-21):向所有拿得到密码的盘推新 keyfile,尽力而为。
+	// 未记密码/推失败的盘,远端 keyfile 停在旧口令——只影响该盘的新设备恢复
+	// (需旧口令),本机不受影响(本地已换新,MK 相同)。
+	a.mu.Lock()
+	drives := append([]config.Drive(nil), a.cfg.Drives...)
+	a.mu.Unlock()
+	okCnt, skipCnt := 0, 0
+	var failed []string
+	for _, d := range drives {
+		if !d.RememberPassword || d.Password == "" {
+			skipCnt++
+			continue
+		}
+		ctx, cancel := context.WithTimeout(a.callCtx(), backupTimeout)
+		if st, cerr := buildStore(&d); cerr == nil {
+			if perr := st.PutKeyFile(ctx, kf.Bytes()); perr == nil {
+				okCnt++
+				cancel()
+				continue
+			}
+		}
+		cancel()
+		failed = append(failed, d.Name)
+	}
+	msg := fmt.Sprintf("口令已更改(旧口令即刻失效);keyfile 已同步 %d 块盘", okCnt)
+	if skipCnt > 0 {
+		msg += fmt.Sprintf(";%d 块未记密码的盘未同步(新设备恢复它们需旧口令)", skipCnt)
+	}
+	if len(failed) > 0 {
+		msg += ";同步失败:" + strings.Join(failed, "、")
+	}
+	level := "info"
+	if len(failed) > 0 {
+		level = "error"
+	}
+	a.emitNotify(level, msg)
 	return nil
 }

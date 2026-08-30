@@ -22,7 +22,7 @@ let searchTimer: ReturnType<typeof setTimeout> | null = null
 
 export const store = reactive({
   /** 后端 app:state 快照(startup 事件早于订阅会丢,init 主动拉) */
-  state: { Configured: false, Unlocked: false, FileCount: 0, HasLocalKeyfile: false },
+  state: { Configured: false, Unlocked: false, FileCount: 0, HasLocalKeyfile: false, DriveName: '', DriveCount: 0 },
   /** init() 拉回真实 state 后置真——此前 state 是初值,分支判定不可依赖 */
   ready: false,
   page: 'files' as Page,
@@ -48,13 +48,15 @@ export const store = reactive({
 
   // Settings 页
   settings: null as config.Settings | null,
-  webdav: null as main.WebDAVConfig | null,
+  drives: [] as main.DriveInfo[], // 多网盘档案(TODO-21)
   lastBackup: null as backup.BackupInfo | null,
   gcReport: null as main.GCReport | null,
 
   toasts: [] as Toast[],
   /** 长操作忙碌文案(解锁中/恢复中/测试中…),空串 = 空闲 */
   busy: '',
+  /** 换库事件序号:Files 页 watch 它清搜索框等页面本地状态(TODO-21) */
+  driveSwitchSeq: 0,
 })
 
 // ---- 基础 ----
@@ -100,6 +102,19 @@ export async function init() {
     if (store.search.active) runSearch(store.search.query)
     else loadFolder(store.folder.id)
     refreshState()
+  })
+  EventsOn('drive:switched', async () => {
+    // 换库(TODO-21):管线已随库重建,本地缓存全部作废——回根目录清状态。
+    // driveSwitchSeq 通知 Files 页清搜索框(搜索词是页面本地状态)。
+    store.detail = null
+    store.selection.clear()
+    store.folderSelection.clear()
+    store.thumbs.clear()
+    exitSearch()
+    store.driveSwitchSeq++
+    await loadFolder(1)
+    store.transfers = (await API.Transfers()) ?? []
+    refreshDrives()
   })
   EventsOn('notify', (n) => toast(n?.level === 'error' ? 'error' : 'info', n?.text ?? ''))
 }
@@ -185,11 +200,81 @@ export async function testConnection(c: main.WebDAVConfig): Promise<main.TestRes
   return API.TestConnection(c)
 }
 
+/** 向导首配:写活动盘,无档案则建第一个盘(后端 SaveWebDAVConfig) */
 export async function saveWebDAVConfig(c: main.WebDAVConfig): Promise<boolean> {
   const done = setBusy('保存配置…')
   try {
     await API.SaveWebDAVConfig(c)
-    await refreshState()
+    await Promise.all([refreshState(), refreshDrives()])
+    return true
+  } catch (e) {
+    fail(e)
+    return false
+  } finally {
+    done()
+  }
+}
+
+// ---- 多网盘档案(TODO-21) ----
+
+export async function refreshDrives() {
+  try {
+    store.drives = (await API.ListDrives()) ?? []
+  } catch (e) {
+    fail(e)
+  }
+}
+
+export interface DriveForm {
+  id: string
+  name: string
+  url: string
+  username: string
+  password: string
+  rootPath: string
+  rememberPassword: boolean
+}
+
+/** 新增(ID 空)或编辑网盘档案;编辑活动盘时后端热更新远端客户端 */
+export async function saveDrive(f: DriveForm): Promise<boolean> {
+  const done = setBusy('保存网盘档案…')
+  try {
+    await API.SaveDrive({
+      ID: f.id,
+      Name: f.name,
+      URL: f.url,
+      Username: f.username,
+      Password: f.password,
+      RootPath: f.rootPath,
+      RememberPassword: f.rememberPassword,
+    })
+    await refreshDrives()
+    return true
+  } catch (e) {
+    fail(e)
+    return false
+  } finally {
+    done()
+  }
+}
+
+export async function deleteDrive(id: string): Promise<boolean> {
+  try {
+    await API.DeleteDrive(id)
+    await refreshDrives()
+    return true
+  } catch (e) {
+    fail(e)
+    return false
+  }
+}
+
+/** 切换当前库:后端要求管线空闲;成功后 drive:switched 事件统一清状态 */
+export async function activateDrive(id: string): Promise<boolean> {
+  const done = setBusy('切换网盘…')
+  try {
+    await API.SetActiveDrive(id)
+    await refreshDrives()
     return true
   } catch (e) {
     fail(e)
@@ -492,7 +577,7 @@ export async function cancelTransfer(id: string) {
 export async function loadSettings() {
   try {
     store.settings = await API.GetSettings()
-    store.webdav = await API.GetWebDAVConfig()
+    store.drives = (await API.ListDrives()) ?? []
   } catch (e) {
     fail(e)
   }

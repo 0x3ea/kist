@@ -118,7 +118,15 @@ func NewManager(d Deps) *Manager {
 	return m
 }
 
-func tempRoot() string { return filepath.Join(os.TempDir(), "kist") }
+// tempRoot 传输临时根。KIST_TMPDIR 可覆盖:多实例(GUI+CLI)并行时默认共用
+// /tmp/kist 会互相清理对方产物(CLAUDE.md 记录的坑),需要隔离的场合各自指定;
+// 测试也用它避免并行包之间对 /tmp/kist 的争用(构造 NewManager 即清场)。
+func tempRoot() string {
+	if d := os.Getenv("KIST_TMPDIR"); d != "" {
+		return d
+	}
+	return filepath.Join(os.TempDir(), "kist")
+}
 
 // SetRemote 替换远端存储(GUI 保存新 WebDAV 配置后热更新):之后发起的网络
 // 调用走新端点,在途任务持有旧 client 自行收尾。Deps 其余项都是闭包动态读,

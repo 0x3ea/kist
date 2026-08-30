@@ -40,8 +40,9 @@ var (
 const usageText = `用法:kistctl <子命令> [参数]
 
 子命令:
-  config set --url <URL> --user <用户名> [--root /kist] [--pass-stdin]  配置网盘
-  init    --pass-stdin                  建账户:主密钥+keyfile+远端初始化
+  config set --url <URL> --user <用户名> [--name 名称] [--root /kist] [--pass-stdin]  配置当前网盘(无档案时创建第一个)
+  drive   list | use <名称|ID|序号>      多网盘档案:列出 / 切换当前库所在盘(一盘一库,共用 keyfile)
+  init    --pass-stdin                  建账户:主密钥+keyfile+远端初始化(已有 keyfile 时=在此盘开新库)
   unlock  --pass-stdin                  校验口令(本地 keyfile 优先,无则拉远端)
   put     <路径...> [--dest /目录] [--defer] [--expand] --pass-stdin  加密上传(文件夹默认按叶子目录打包,一话一对象;--expand 逐文件;--defer 只入出站箱)
   outbox  list|push|verify|discard       出站箱:待上传产物的搬运与收账(TODO-13)
@@ -81,6 +82,8 @@ func run(args []string) error {
 	switch cmd {
 	case "config":
 		err = cmdConfig(rest)
+	case "drive":
+		err = cmdDrive(rest)
 	case "init":
 		err = cmdInit(rest)
 	case "unlock":
@@ -182,25 +185,39 @@ func passStdinFlag(fs *flag.FlagSet) *bool {
 	return fs.Bool("pass-stdin", false, "从 stdin 读一行口令(或用环境变量 KIST_PASS)")
 }
 
-// loadStore 读取配置并连上远端;未配置时返回 NOT_CONFIGURED。
+// loadStore 读取配置并连上远端(活动盘);未配置时返回 NOT_CONFIGURED。
 func loadStore() (*config.StoredConfig, *remote.Store, error) {
 	cfg, err := config.Load()
 	if err != nil {
 		return nil, nil, err
 	}
-	if cfg.URL == "" || cfg.Username == "" {
+	d := cfg.ActiveDrive()
+	if !cfg.Configured() || d == nil {
 		return nil, nil, errs.New(errs.NotConfigured,
 			"尚未配置网盘:先执行 kistctl config set --url <URL> --user <用户名> --pass-stdin")
 	}
-	c, err := dav.New(dav.Config{URL: cfg.URL, Username: cfg.Username, Password: cfg.Password, RootPath: cfg.RootPath})
+	c, err := dav.New(dav.Config{URL: d.URL, Username: d.Username, Password: d.Password, RootPath: d.RootPath})
 	if err != nil {
 		return nil, nil, errs.Wrap(errs.BadConfig, err)
 	}
-	return cfg, remote.NewStore(c, cfg.RootPath), nil
+	return cfg, remote.NewStore(c, d.RootPath), nil
 }
 
+// openIndex 打开活动盘的本地索引库(TODO-21:一盘一库,文件名锚定盘 ID);
+// 旧单库 index.db 在此随迁(幂等)。
 func openIndex() (*index.DB, error) {
-	db, err := index.Open(config.IndexPath())
+	cfg, err := config.Load()
+	if err != nil {
+		return nil, err
+	}
+	d := cfg.ActiveDrive()
+	if d == nil {
+		return nil, errs.New(errs.NotConfigured, "尚未配置网盘:先执行 kistctl config set")
+	}
+	if err := index.MigrateIndexFile(config.LegacyIndexPath(), config.DriveIndexPath(d.ID)); err != nil {
+		return nil, err
+	}
+	db, err := index.Open(config.DriveIndexPath(d.ID))
 	if err != nil {
 		return nil, errs.From(err)
 	}
@@ -261,13 +278,14 @@ func splitVirtualPath(p string) ([]string, error) {
 
 func cmdConfig(args []string) error {
 	if len(args) == 0 || args[0] != "set" {
-		return errs.New(errs.BadConfig, "用法:kistctl config set --url <URL> --user <用户名> [--pass-stdin]")
+		return errs.New(errs.BadConfig, "用法:kistctl config set --url <URL> --user <用户名> [--name 名称] [--pass-stdin]")
 	}
 	args = args[1:]
 	fs := flag.NewFlagSet("config set", flag.ContinueOnError)
 	url := fs.String("url", "", "WebDAV 地址(如 https://dav.example.com/dav)")
 	user := fs.String("user", "", "用户名")
-	root := fs.String("root", "", "远端根目录(默认 /kist)")
+	name := fs.String("name", "", "档案展示名(默认取 URL 域名)")
+	root := fs.String("root", "", "远端根目录(默认 /kist;同账号不同根目录可开多库)")
 	passStdin := fs.Bool("pass-stdin", false, "从 stdin 读一行 WebDAV 密码")
 	if err := parseArgs(fs, args); err != nil {
 		return err
@@ -276,26 +294,39 @@ func cmdConfig(args []string) error {
 	if err != nil {
 		return err
 	}
+	// 编辑活动盘;无任何档案时创建第一个(config set 仍是首次配置的入口)
+	d := cfg.ActiveDrive()
+	if d == nil {
+		cfg.Drives = append(cfg.Drives, config.Drive{ID: config.NewDriveID()})
+		d = &cfg.Drives[0]
+	}
+	if *name != "" {
+		d.Name = *name
+	}
 	if *url != "" {
-		cfg.URL = *url
+		d.URL = *url
 	}
 	if *user != "" {
-		cfg.Username = *user
+		d.Username = *user
 	}
 	if *root != "" {
-		cfg.RootPath = *root
+		d.RootPath = *root
 	}
 	if *passStdin {
 		pw, err := readPass(true) // 这里的口令是 WebDAV 账户密码
 		if err != nil {
 			return err
 		}
-		cfg.Password = pw
-		cfg.Settings.RememberPassword = true
+		d.Password = pw
+		d.RememberPassword = true
 		fmt.Println("注意:WebDAV 密码将以明文保存在", config.ConfigPath())
 	}
-	if cfg.URL == "" || cfg.Username == "" {
+	if d.URL == "" || d.Username == "" {
 		return errs.New(errs.BadConfig, "--url 与 --user 均为必填")
+	}
+	if dup := cfg.FindDuplicate(d); dup != nil {
+		return errs.New(errs.BadConfig,
+			fmt.Sprintf("与档案「%s」同地址/用户名/根目录——两个档案会指向同一个库,互相覆盖备份", dup.Name))
 	}
 	if err := config.Save(cfg); err != nil {
 		return err
@@ -337,7 +368,53 @@ func cmdInit(args []string) error {
 	}
 	if exists {
 		return errs.New(errs.BadConfig,
-			"远端已有 keyfile(此网盘目录已被初始化);如需重新开始请先手动清理远端目录")
+			"远端已有 keyfile(此网盘目录已被初始化);请用 unlock 或 pull 接入")
+	}
+	// 共用 keyfile(TODO-21):本地已有 keyfile = 在此盘开新库——沿用现有
+	// 密钥与口令,绝不生成新 MK;口令不符即拒绝。
+	if local, lerr := os.ReadFile(config.KeyFilePath()); lerr == nil {
+		kf, kerr := crypto.ParseKeyFile(local)
+		if kerr != nil {
+			return errs.Wrap(errs.Corrupt, kerr)
+		}
+		mk, uerr := kf.Unlock(pass)
+		if uerr != nil {
+			return errs.From(uerr) // AUTH_FAILED:开新库必须沿用现有口令
+		}
+		mk.Wipe()
+		if err := store.PutKeyFile(ctx, local); err != nil {
+			return errs.Wrap(errs.DavError, err)
+		}
+		// 本地索引归档(非空时,疑似上一任库的残留),重开全新空库
+		db, err := openIndex()
+		if err != nil {
+			return err
+		}
+		archived := ""
+		if s, serr := db.FolderSummary(1); serr == nil && (s.FileCount > 0 || s.PendingCount > 0) {
+			cfg, _ := config.Load()
+			d := cfg.ActiveDrive()
+			if d != nil {
+				db.Close()
+				bdir := config.BackupDir()
+				if err := os.MkdirAll(bdir, 0o700); err != nil {
+					return err
+				}
+				archived = filepath.Join(bdir, fmt.Sprintf("index-%s-%d.db", d.ID, time.Now().Unix()))
+				if err := os.Rename(config.DriveIndexPath(d.ID), archived); err != nil {
+					return err
+				}
+				if db, err = openIndex(); err != nil {
+					return err
+				}
+			}
+		}
+		db.Close()
+		fmt.Printf("已在此网盘开新库:推入现有 keyfile(共用密钥),本地索引 %s\n", config.DriveIndexPath(activeDriveID()))
+		if archived != "" {
+			fmt.Println("原本地索引归档于", archived)
+		}
+		return nil
 	}
 	kf, mk, err := crypto.CreateKeyFile(pass, crypto.DefaultArgon2Params())
 	if err != nil {
@@ -355,16 +432,92 @@ func cmdInit(args []string) error {
 	}
 	db.Close()
 	mk.Wipe()
-	fmt.Printf("账户已建立:远端 %s/keyfile,本地索引 %s\n", cfgRootPath(), config.IndexPath())
+	fmt.Printf("账户已建立:远端 %s/keyfile,本地索引 %s\n", cfgRootPath(), config.DriveIndexPath(activeDriveID()))
+	return nil
+}
+
+// activeDriveID 返回活动盘 ID(开新库/建账户的打印用;无盘返回空串)。
+func activeDriveID() string {
+	cfg, _ := config.Load()
+	if d := cfg.ActiveDrive(); d != nil {
+		return d.ID
+	}
+	return ""
+}
+
+// cmdDrive 多网盘档案管理(TODO-21):list 列出,use 切换当前库所在盘。
+// CLI 无常驻管线,切换只改 config.active;索引文件随迁发生在下次 openIndex。
+func cmdDrive(args []string) error {
+	if len(args) == 0 {
+		return errs.New(errs.BadConfig, "用法:kistctl drive list | kistctl drive use <名称|ID|序号>")
+	}
+	cfg, err := config.Load()
+	if err != nil {
+		return err
+	}
+	switch args[0] {
+	case "list":
+		if len(cfg.Drives) == 0 {
+			fmt.Println("无网盘档案:先执行 kistctl config set --url <URL> --user <用户名>")
+			return nil
+		}
+		for i, d := range cfg.Drives {
+			mark := " "
+			if d.ID == cfg.Active {
+				mark = "*"
+			}
+			pass := "未记密码"
+			if d.RememberPassword {
+				pass = "已记密码"
+			}
+			fmt.Printf("%s [%d] %s\n    %s  用户:%s  根:%s  (%s)\n", mark, i+1, d.Name, d.URL, d.Username, d.RootPath, pass)
+		}
+		return nil
+	case "use":
+		if len(args) < 2 {
+			return errs.New(errs.BadConfig, "用法:kistctl drive use <名称|ID|序号>(用 drive list 查看)")
+		}
+		d := resolveDrive(cfg, args[1])
+		if d == nil {
+			return errs.New(errs.NotFound, fmt.Sprintf("找不到网盘档案 %q:用 kistctl drive list 查看", args[1]))
+		}
+		if d.ID == cfg.Active {
+			fmt.Printf("「%s」已是当前网盘\n", d.Name)
+			return nil
+		}
+		cfg.Active = d.ID
+		if err := config.Save(cfg); err != nil {
+			return err
+		}
+		fmt.Printf("已切换到「%s」(%s,根 %s)。下次命令起生效\n", d.Name, d.URL, d.RootPath)
+		return nil
+	default:
+		return errs.New(errs.BadConfig, fmt.Sprintf("未知 drive 子命令 %q:用法:kistctl drive list | use <名称|ID|序号>", args[0]))
+	}
+}
+
+// resolveDrive 按精确 ID、精确名称、1 起始序号解析档案。
+func resolveDrive(cfg *config.StoredConfig, key string) *config.Drive {
+	if d := cfg.DriveByID(key); d != nil {
+		return d
+	}
+	for i := range cfg.Drives {
+		if cfg.Drives[i].Name == key {
+			return &cfg.Drives[i]
+		}
+	}
+	if n, err := strconv.Atoi(key); err == nil && n >= 1 && n <= len(cfg.Drives) {
+		return &cfg.Drives[n-1]
+	}
 	return nil
 }
 
 func cfgRootPath() string {
 	cfg, _ := config.Load()
-	if cfg.RootPath == "" {
-		return "/kist"
+	if d := cfg.ActiveDrive(); d != nil && d.RootPath != "" {
+		return d.RootPath
 	}
-	return cfg.RootPath
+	return "/kist"
 }
 
 func cmdUnlock(args []string) error {
@@ -1525,21 +1678,25 @@ func cmdMigrate(args []string) error {
 		if err != nil {
 			return err
 		}
-		cfg.URL = *url
-		cfg.Username = *user
-		cfg.RootPath = dstRoot
+		// 迁移落点写回当前档案(TODO-21):URL/用户/根目录换新,库文件锚定
+		// 盘 ID 不变——迁移本就是"同一块本地库换个远端住"
+		d := cfg.ActiveDrive()
+		if d == nil {
+			return errs.New(errs.NotConfigured, "尚未配置网盘:先执行 kistctl config set")
+		}
+		d.URL, d.Username, d.RootPath = *url, *user, dstRoot
 		if pass != "" {
-			cfg.Password = pass
-			cfg.Settings.RememberPassword = true
+			d.Password = pass
+			d.RememberPassword = true
 		} else {
 			// 旧密码属于旧网盘,不能带去新端
-			cfg.Password = ""
-			cfg.Settings.RememberPassword = false
+			d.Password = ""
+			d.RememberPassword = false
 		}
 		if err := config.Save(cfg); err != nil {
 			return err
 		}
-		fmt.Printf("已切换到新网盘(%s,%s)。本地 keyfile 与 index.db 无需变动;建议尽快 backup 一次\n",
+		fmt.Printf("已切换到新网盘(%s,%s)。本地 keyfile 与索引文件无需变动;建议尽快 backup 一次\n",
 			*url, dstRoot)
 		return nil
 	}

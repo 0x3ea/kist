@@ -114,6 +114,9 @@ async function onRecover() {
     <div class="card">
       <h1>kist</h1>
       <p class="sub">WebDAV 加密网盘管理器</p>
+      <p v-if="state.DriveName" class="drive-name">
+        当前网盘:{{ state.DriveName }}<template v-if="state.DriveCount > 1"> · 共 {{ state.DriveCount }} 个档案</template>
+      </p>
 
       <!-- ① 首次向导 -->
       <template v-if="mode === 'wizard'">
@@ -205,6 +208,12 @@ h2 {
 .sub {
   color: var(--dim);
   margin-top: -8px;
+}
+
+.drive-name {
+  color: var(--dim);
+  font-size: 12px;
+  margin-top: -10px;
 }
 
 .hint {

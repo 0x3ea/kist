@@ -18,6 +18,10 @@ export function CreateAccount(arg1) {
   return window['go']['main']['App']['CreateAccount'](arg1);
 }
 
+export function DeleteDrive(arg1) {
+  return window['go']['main']['App']['DeleteDrive'](arg1);
+}
+
 export function DeleteEntries(arg1, arg2) {
   return window['go']['main']['App']['DeleteEntries'](arg1, arg2);
 }
@@ -62,6 +66,10 @@ export function ImportFromRemote(arg1) {
   return window['go']['main']['App']['ImportFromRemote'](arg1);
 }
 
+export function ListDrives() {
+  return window['go']['main']['App']['ListDrives']();
+}
+
 export function ListFolder(arg1) {
   return window['go']['main']['App']['ListFolder'](arg1);
 }
@@ -98,6 +106,10 @@ export function RunGC() {
   return window['go']['main']['App']['RunGC']();
 }
 
+export function SaveDrive(arg1) {
+  return window['go']['main']['App']['SaveDrive'](arg1);
+}
+
 export function SaveSettings(arg1) {
   return window['go']['main']['App']['SaveSettings'](arg1);
 }
@@ -108,6 +120,10 @@ export function SaveWebDAVConfig(arg1) {
 
 export function SearchAll(arg1, arg2) {
   return window['go']['main']['App']['SearchAll'](arg1, arg2);
+}
+
+export function SetActiveDrive(arg1) {
+  return window['go']['main']['App']['SetActiveDrive'](arg1);
 }
 
 export function SetFileCover(arg1, arg2) {

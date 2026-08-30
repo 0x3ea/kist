@@ -61,7 +61,6 @@ export namespace config {
 	export class Settings {
 	    concurrency: number;
 	    chunk_mib: number;
-	    remember_password: boolean;
 	    auto_backup: boolean;
 	    outbox_push_fail: string;
 	    size_padding: string;
@@ -74,7 +73,6 @@ export namespace config {
 	        if ('string' === typeof source) source = JSON.parse(source);
 	        this.concurrency = source["concurrency"];
 	        this.chunk_mib = source["chunk_mib"];
-	        this.remember_password = source["remember_password"];
 	        this.auto_backup = source["auto_backup"];
 	        this.outbox_push_fail = source["outbox_push_fail"];
 	        this.size_padding = source["size_padding"];
@@ -263,6 +261,8 @@ export namespace main {
 	    Unlocked: boolean;
 	    FileCount: number;
 	    HasLocalKeyfile: boolean;
+	    DriveName: string;
+	    DriveCount: number;
 	
 	    static createFrom(source: any = {}) {
 	        return new AppState(source);
@@ -274,6 +274,58 @@ export namespace main {
 	        this.Unlocked = source["Unlocked"];
 	        this.FileCount = source["FileCount"];
 	        this.HasLocalKeyfile = source["HasLocalKeyfile"];
+	        this.DriveName = source["DriveName"];
+	        this.DriveCount = source["DriveCount"];
+	    }
+	}
+	export class DriveInfo {
+	    ID: string;
+	    Name: string;
+	    URL: string;
+	    Username: string;
+	    RootPath: string;
+	    RememberPassword: boolean;
+	    Password: string;
+	    Active: boolean;
+	
+	    static createFrom(source: any = {}) {
+	        return new DriveInfo(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.ID = source["ID"];
+	        this.Name = source["Name"];
+	        this.URL = source["URL"];
+	        this.Username = source["Username"];
+	        this.RootPath = source["RootPath"];
+	        this.RememberPassword = source["RememberPassword"];
+	        this.Password = source["Password"];
+	        this.Active = source["Active"];
+	    }
+	}
+	export class DriveInput {
+	    ID: string;
+	    Name: string;
+	    URL: string;
+	    Username: string;
+	    Password: string;
+	    RootPath: string;
+	    RememberPassword: boolean;
+	
+	    static createFrom(source: any = {}) {
+	        return new DriveInput(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.ID = source["ID"];
+	        this.Name = source["Name"];
+	        this.URL = source["URL"];
+	        this.Username = source["Username"];
+	        this.Password = source["Password"];
+	        this.RootPath = source["RootPath"];
+	        this.RememberPassword = source["RememberPassword"];
 	    }
 	}
 	export class FileDetail {

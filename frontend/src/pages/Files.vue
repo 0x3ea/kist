@@ -3,7 +3,7 @@
 // (上传文件/文件夹、新建文件夹、下载、视图切换;操作类入口已收进右键菜单,
 // 见 TODO-20)、面包屑、列表/网格双视图、右侧详情面板。
 // 目录进入 = loadFolder;搜索态点击目录 = 跳进该目录。
-import { computed, ref } from 'vue'
+import { computed, ref, watch } from 'vue'
 import { index } from '../../wailsjs/go/models'
 import {
   store,
@@ -28,6 +28,13 @@ import { humanSize } from '../format'
 const query = ref('')
 const showMove = ref(false)
 const showNewFolder = ref(false)
+// 换库(TODO-21):store 侧统一回根目录清缓存,这里只清页面本地的搜索词
+watch(
+  () => store.driveSwitchSeq,
+  () => {
+    query.value = ''
+  },
+)
 // 重命名目标(TODO-19,仅目录):恰好选中一个目录时可用
 const renameTarget = ref<{ id: number; name: string } | null>(null)
 // 元数据对话框目标:目录(TODO-16)或文件(TODO-17),恰好选中一个时可用

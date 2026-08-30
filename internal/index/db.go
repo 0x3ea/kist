@@ -235,6 +235,33 @@ func (db *DB) ReplaceWith(path string) (err error) {
 	return nil
 }
 
+// MigrateIndexFile 把旧单库索引文件改名到新位置(TODO-21 schema v2 的一次性
+// 物理迁移,幂等可重入)。先 Open+Close 触发 WAL checkpoint,防 -wal 里的
+// 尾数据不随主文件走;-wal/-shm 残留一并改名。目标已存在时不动旧文件
+// (疑似迁移后残留,留待人工处理,绝不静默删数据);旧文件损坏不阻断迁移
+// (字节原样搬走,坏库在下次 Open 时报错,不在这里二次毁伤)。
+func MigrateIndexFile(oldPath, newPath string) error {
+	if _, err := os.Stat(oldPath); err != nil {
+		if os.IsNotExist(err) {
+			return nil // 无旧文件:新安装或已迁移
+		}
+		return err
+	}
+	if _, err := os.Stat(newPath); err == nil {
+		return nil // 目标已在:保留旧文件不动
+	}
+	if db, err := Open(oldPath); err == nil {
+		db.Close() // checkpoint 并清 -wal
+	}
+	if err := os.Rename(oldPath, newPath); err != nil {
+		return fmt.Errorf("index: 迁移索引文件 %s → %s: %w", oldPath, newPath, err)
+	}
+	for _, suffix := range []string{"-wal", "-shm"} {
+		_ = os.Rename(oldPath+suffix, newPath+suffix) // 有则迁,无则忽略
+	}
+	return nil
+}
+
 // ---- 小工具 ----
 
 // newUUID 生成 16 随机字节的 hex(与 blob meta.fileID 的 hex 形态一致)。

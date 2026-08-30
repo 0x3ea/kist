@@ -14,6 +14,8 @@ export function ChangePassphrase(arg1:string,arg2:string):Promise<void>;
 
 export function CreateAccount(arg1:string):Promise<void>;
 
+export function DeleteDrive(arg1:string):Promise<void>;
+
 export function DeleteEntries(arg1:Array<number>,arg2:Array<number>):Promise<void>;
 
 export function DownloadTo(arg1:Array<number>,arg2:string):Promise<number>;
@@ -36,6 +38,8 @@ export function GetWebDAVConfig():Promise<main.WebDAVConfig>;
 
 export function ImportFromRemote(arg1:string):Promise<backup.PullResult>;
 
+export function ListDrives():Promise<Array<main.DriveInfo>>;
+
 export function ListFolder(arg1:number):Promise<main.FolderView>;
 
 export function Lock():Promise<void>;
@@ -54,11 +58,15 @@ export function RenameFolder(arg1:number,arg2:string):Promise<void>;
 
 export function RunGC():Promise<main.GCReport>;
 
+export function SaveDrive(arg1:main.DriveInput):Promise<void>;
+
 export function SaveSettings(arg1:config.Settings):Promise<void>;
 
 export function SaveWebDAVConfig(arg1:main.WebDAVConfig):Promise<void>;
 
 export function SearchAll(arg1:string,arg2:number):Promise<main.SearchView>;
+
+export function SetActiveDrive(arg1:string):Promise<void>;
 
 export function SetFileCover(arg1:number,arg2:string):Promise<void>;
 

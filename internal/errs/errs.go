@@ -16,6 +16,7 @@ const (
 	NotFound      = "NOT_FOUND"      // 索引里找不到目标
 	Corrupt       = "CORRUPT"        // 数据/密钥文件损坏或密钥不符
 	Locked        = "LOCKED"         // 未解锁就发起传输
+	Busy          = "BUSY"           // 有传输进行中,操作暂不可用(如切换网盘,TODO-21)
 	Internal      = "INTERNAL"       // 其余内部错误
 )
 

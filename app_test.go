@@ -25,12 +25,21 @@ import (
 func newTestApp(t *testing.T) *App {
 	t.Helper()
 	t.Setenv("KIST_HOME", t.TempDir())
-	db, err := index.Open(config.IndexPath())
+	// 活动盘档案 + 对应库文件(TODO-21:索引路径锚定盘 ID)
+	id := config.NewDriveID()
+	if err := config.Save(&config.StoredConfig{
+		Drives: []config.Drive{{ID: id, Name: "测试盘", URL: "https://dav.example.com/dav", Username: "u"}},
+		Active: id,
+	}); err != nil {
+		t.Fatalf("config.Save: %v", err)
+	}
+	db, err := index.Open(config.DriveIndexPath(id))
 	if err != nil {
 		t.Fatalf("index.Open: %v", err)
 	}
 	t.Cleanup(func() { db.Close() })
 	a := NewApp()
+	a.cfg = &config.StoredConfig{Drives: []config.Drive{{ID: id, Name: "测试盘", URL: "https://dav.example.com/dav", Username: "u"}}, Active: id}
 	a.db = db
 	return a
 }

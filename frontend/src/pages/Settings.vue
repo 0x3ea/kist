@@ -1,28 +1,95 @@
 <script setup lang="ts">
-// Settings.vue — 设置页:WebDAV 配置、行为偏好(并发/块大小/自动备份/大小混淆)、
-// 立即备份、孤儿清理两步(预览→确认)、改口令、锁定。改并发/块大小对进行中
-// 传输的下一任务生效(管线闭包每轮重读)。
+// Settings.vue — 设置页:网盘档案列表(一盘一库,TODO-21)、行为偏好
+// (并发/块大小/自动备份/大小混淆)、立即备份、孤儿清理两步(预览→确认)、
+// 改口令、锁定。改并发/块大小对进行中传输的下一任务生效(管线闭包每轮重读)。
 import { onMounted, reactive, ref } from 'vue'
 import { config, main } from '../../wailsjs/go/models'
 import {
   store,
   backupNow,
   changePassphrase,
+  deleteDrive,
+  activateDrive,
   loadSettings,
   lock,
   previewGC,
   runGC,
+  saveDrive,
   saveSettings,
-  saveWebDAVConfig,
   testConnection,
+  type DriveForm,
 } from '../store'
 import { fullTime } from '../format'
 
-const davMsg = ref('')
-const davOk = ref(false)
+// ---- 网盘档案(TODO-21):列表 + 增/改/删/切换/测试 ----
+const showForm = ref(false)
+const form = reactive<DriveForm>({
+  id: '',
+  name: '',
+  url: '',
+  username: '',
+  password: '',
+  rootPath: '/kist',
+  rememberPassword: false,
+})
+const formMsg = ref('')
+const formOk = ref(false)
 
-// WebDAV 表单:进入页面时拉当前值;密码仅在勾了"记住密码"时有回显
-const dav = reactive(new main.WebDAVConfig({ RootPath: '/kist' }))
+function onAddDrive() {
+  Object.assign(form, { id: '', name: '', url: '', username: '', password: '', rootPath: '/kist', rememberPassword: false })
+  formMsg.value = ''
+  showForm.value = true
+}
+
+function onEditDrive(d: main.DriveInfo) {
+  // 密码仅"记住密码"的档案有回显(未记的本就没存)
+  Object.assign(form, {
+    id: d.ID,
+    name: d.Name,
+    url: d.URL,
+    username: d.Username,
+    password: d.Password ?? '',
+    rootPath: d.RootPath,
+    rememberPassword: d.RememberPassword,
+  })
+  formMsg.value = ''
+  showForm.value = true
+}
+
+async function onTestDrive() {
+  formMsg.value = ''
+  const r = await testConnection(
+    new main.WebDAVConfig({
+      URL: form.url,
+      Username: form.username,
+      Password: form.password,
+      RootPath: form.rootPath,
+      RememberPassword: form.rememberPassword,
+    }),
+  )
+  formOk.value = r.Ok
+  formMsg.value = r.Detail
+}
+
+async function onSaveDrive() {
+  if (await saveDrive({ ...form })) showForm.value = false
+}
+
+async function onDeleteDrive(d: main.DriveInfo) {
+  if (!confirm(`删除档案「${d.Name}」?\n远端数据不动;本地索引文件保留在 KIST_HOME 下(index-${d.ID}.db)。`)) return
+  await deleteDrive(d.ID)
+}
+
+async function onActivateDrive(d: main.DriveInfo) {
+  if (
+    !confirm(
+      `切换到「${d.Name}」?\n当前盘落后的索引会先补一次备份;有在途传输时切换会被拒绝;切换后文件列表换成本盘的库(口令不变,无需重新解锁)。`,
+    )
+  )
+    return
+  await activateDrive(d.ID)
+}
+
 const settings = reactive({
   concurrency: 2,
   chunk_mib: 4,
@@ -32,7 +99,6 @@ const settings = reactive({
 
 onMounted(async () => {
   await loadSettings()
-  if (store.webdav) Object.assign(dav, store.webdav)
   if (store.settings) {
     settings.concurrency = store.settings.concurrency
     settings.chunk_mib = store.settings.chunk_mib
@@ -40,17 +106,6 @@ onMounted(async () => {
     settings.size_padding = store.settings.size_padding
   }
 })
-
-async function onTest() {
-  davMsg.value = ''
-  const r = await testConnection(dav)
-  davOk.value = r.Ok
-  davMsg.value = r.Detail
-}
-
-async function onSaveDav() {
-  if (await saveWebDAVConfig(dav)) davMsg.value = ''
-}
 
 async function onSaveSettings() {
   // 展开 store.settings 保留表单未覆盖的字段(remember_password/outbox_push_fail)
@@ -109,18 +164,49 @@ async function onChangePass() {
   <div class="settings">
     <section>
       <h2>WebDAV 网盘</h2>
-      <label>地址<input v-model="dav.URL" type="text" placeholder="https://dav.example.com/dav" /></label>
-      <label>用户名<input v-model="dav.Username" type="text" /></label>
-      <label>密码<input v-model="dav.Password" type="password" placeholder="留空 = 不修改已存密码" /></label>
-      <label>远端根目录<input v-model="dav.RootPath" type="text" /></label>
-      <label class="check">
-        <input v-model="dav.RememberPassword" type="checkbox" />
-        记住密码(明文保存于本机 config.json,共用设备请勿勾选)
-      </label>
-      <p v-if="davMsg" class="msg" :class="davOk ? 'ok' : 'err'">{{ davMsg }}</p>
+      <p class="dim">
+        一盘一库:每个档案是独立的库(各自的文件列表与远端备份),共用同一把加密口令——切盘不重新解锁。
+      </p>
+      <div class="drives">
+        <div v-for="d in store.drives" :key="d.ID" class="drive" :class="{ active: d.Active }">
+          <div class="d-head">
+            <span class="d-name">
+              {{ d.Name }}
+              <em v-if="d.Active" class="cur">当前</em>
+            </span>
+            <span class="d-actions">
+              <button v-if="!d.Active" @click="onActivateDrive(d)">切换</button>
+              <button @click="onEditDrive(d)">编辑</button>
+              <button v-if="!d.Active" class="danger" @click="onDeleteDrive(d)">删除</button>
+            </span>
+          </div>
+          <div class="dim">
+            {{ d.URL }} · {{ d.Username }} · 根 {{ d.RootPath }}<template v-if="d.RememberPassword"> · 已记密码</template>
+          </div>
+        </div>
+        <div v-if="store.drives.length === 0" class="dim">还没有网盘档案,添加一个开始使用。</div>
+      </div>
       <div class="row">
-        <button @click="onTest">测试连接</button>
-        <button class="primary" @click="onSaveDav">保存配置</button>
+        <button @click="onAddDrive">添加网盘</button>
+      </div>
+
+      <!-- 增/改表单:测试连接不落盘,保存走 SaveDrive -->
+      <div v-if="showForm" class="drive-form">
+        <label>名称<input v-model="form.name" type="text" placeholder="留空 = 用 URL 域名" /></label>
+        <label>地址<input v-model="form.url" type="text" placeholder="https://dav.example.com/dav" /></label>
+        <label>用户名<input v-model="form.username" type="text" /></label>
+        <label>密码<input v-model="form.password" type="password" placeholder="不勾选记住则不落盘" /></label>
+        <label>远端根目录<input v-model="form.rootPath" type="text" placeholder="/kist" /></label>
+        <label class="check">
+          <input v-model="form.rememberPassword" type="checkbox" />
+          记住密码(明文保存于本机 config.json,共用设备请勿勾选)
+        </label>
+        <p v-if="formMsg" class="msg" :class="formOk ? 'ok' : 'err'">{{ formMsg }}</p>
+        <div class="row">
+          <button @click="onTestDrive">测试连接</button>
+          <button class="primary" @click="onSaveDrive">保存档案</button>
+          <button @click="showForm = false">取消</button>
+        </div>
       </div>
     </section>
 
@@ -258,6 +344,61 @@ select {
 .msg {
   font-size: 13px;
   word-break: break-all;
+}
+
+/* 网盘档案列表 */
+.drives {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.drive {
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  padding: 10px 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.drive.active {
+  border-color: var(--accent);
+  background: rgba(79, 140, 255, 0.06);
+}
+
+.d-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 8px;
+}
+
+.d-name {
+  font-size: 14px;
+}
+
+.cur {
+  font-style: normal;
+  color: var(--accent);
+  font-size: 12px;
+  border: 1px solid var(--accent);
+  border-radius: 4px;
+  padding: 0 6px;
+  margin-left: 6px;
+}
+
+.d-actions {
+  display: flex;
+  gap: 6px;
+}
+
+.drive-form {
+  border-top: 1px solid var(--line);
+  padding-top: 10px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
 }
 
 .msg.ok {

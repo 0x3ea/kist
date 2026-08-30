@@ -48,10 +48,13 @@ func newEnv(t *testing.T) *env {
 	t.Cleanup(srv.Close)
 
 	t.Setenv("KIST_HOME", t.TempDir())
-	if err := config.Save(&config.StoredConfig{
-		URL: srv.URL, Username: "u", Password: "p",
-		Settings: config.Settings{Concurrency: 2, ChunkMiB: 1}, // 1MiB 块:小文件也走多块路径
-	}); err != nil {
+	// 私有临时根:与并行跑的其他包(可能构造 Manager,构造即清场 /tmp/kist)
+	// 互不干扰——transfer 在途任务的 .part 被人删掉会表现为解密失败,极难排查
+	t.Setenv("KIST_TMPDIR", filepath.Join(t.TempDir(), "tmp"))
+	cfg := &config.StoredConfig{}
+	cfg.Drives = append(cfg.Drives, config.Drive{URL: srv.URL, Username: "u", Password: "p"})
+	cfg.Settings = config.Settings{Concurrency: 2, ChunkMiB: 1} // 1MiB 块:小文件也走多块路径
+	if err := config.Save(cfg); err != nil {
 		t.Fatal(err)
 	}
 
@@ -76,7 +79,7 @@ func newEnv(t *testing.T) *env {
 		t.Fatal(err)
 	}
 
-	db, err := index.Open(config.IndexPath())
+	db, err := index.Open(config.DriveIndexPath(cfg.Drives[0].ID))
 	if err != nil {
 		t.Fatal(err)
 	}

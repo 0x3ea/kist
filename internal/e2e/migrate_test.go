@@ -71,7 +71,9 @@ func TestMigrateEndToEnd(t *testing.T) {
 
 	// ---- 新设备视角:全新 KIST_HOME 指向新端,拉 keyfile、恢复索引、下载 ----
 	t.Setenv("KIST_HOME", t.TempDir())
-	if err := config.Save(&config.StoredConfig{URL: dstSrv.URL, Username: "u2", Password: "p2"}); err != nil {
+	cfgB := &config.StoredConfig{}
+	cfgB.Drives = append(cfgB.Drives, config.Drive{URL: dstSrv.URL, Username: "u2", Password: "p2"})
+	if err := config.Save(cfgB); err != nil {
 		t.Fatal(err)
 	}
 	dcb, err := dav.New(dav.Config{URL: dstSrv.URL, Username: "u2", Password: "p2"})
@@ -86,7 +88,7 @@ func TestMigrateEndToEnd(t *testing.T) {
 	if err := os.WriteFile(config.KeyFilePath(), kfb, 0o600); err != nil {
 		t.Fatal(err)
 	}
-	dbB, err := index.Open(config.IndexPath())
+	dbB, err := index.Open(config.DriveIndexPath(cfgB.Drives[0].ID))
 	if err != nil {
 		t.Fatal(err)
 	}

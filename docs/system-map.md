@@ -1,6 +1,6 @@
 # kist 系统现状图(system-map)
 
-> **定位**:Phase 0–7(CLI 全流程 + GUI 壳)+ TODO 07/08/11/12/13/15/16 时点的**现状快照**——回答"系统现在是什么样、动哪里会影响什么"。
+> **定位**:Phase 0–7(CLI 全流程 + GUI 壳)+ TODO 07–21 时点的**现状快照**——回答"系统现在是什么样、动哪里会影响什么"。
 > 历史沿革看 `phase-*.md` 与 git 历史;加密格式全文规范看 `PLAN.md`;网盘实测特性看 `provider-notes.md`;用户视角看 `quickstart.md`。
 >
 > **维护约定**:每个 TODO/阶段合入时同步本文对应小节(与 quickstart 的同步约定并列)。
@@ -41,17 +41,17 @@ cmd/kistctl(CLI 壳,1440 行)        main.go+app*.go(Wails GUI 壳,Phase 7:31 �
 | 包 | 行数 | 职责 | 关键文件/入口 |
 |---|---|---|---|
 | transfer | 1780 | 管线全部行为:并发调度、进度、取消、临时文件、文件夹打包(TODO-15)、出站箱、gc、缩略图 | `manager.go`(调度)、`upload.go`/`download.go`(旅程)、`pack.go`(粒度/zip/解压)、`push.go`(出站箱)、`gc.go`、`thumb.go` |
-| index | 1543 | SQLite 明文索引:虚拟目录、文件账本、目录元数据/tag(TODO-16)、子树聚合、blob 登记、revision、快照/替换 | `db.go`(打开/WithTx/快照替换)、`schema.go`(迁移)、`files.go`、`folders.go`、`summary.go`(聚合+封面三级链)、`blobs.go`、`outbox.go` |
+| index | 1780 | SQLite 明文索引:虚拟目录、文件账本、目录/文件元数据 tag(TODO-16/17)、子树聚合、blob 登记、revision、快照/替换/库文件迁移 | `db.go`(打开/WithTx/快照/替换/MigrateIndexFile)、`schema.go`(迁移)、`files.go`、`folders.go`、`summary.go`(聚合+封面三级链)、`blobs.go`、`outbox.go` |
 | crypto | 754 | 加密核心:口令→MK 包装(keyfile)、流式分块加解密(blob)、v2 大小量化 | `blob.go`(Writer/Reader)、`keyfile.go`、`format.go`(常量与档位)、`keys.go`(HKDF) |
 | dav | 542 | WebDAV 语义 + 网络可靠性:定长 PUT、流式 GET、O(1) Probe、重试退避 | `client.go`、`retry.go` |
 | backup | 209 | 索引云备份与多设备恢复,LWW | `backup.go` |
 | migrate | 188 | 网盘间纯密文搬运:断点续搬、双端校验 | `migrate.go` |
 | remote | 151 | 远端对象语义:名字→路径、保留名、blob 增删查 | `store.go` |
-| config | 112 | KIST_HOME 路径、config.json、设置归一化 | `config.go` |
+| config | 276 | KIST_HOME 路径、config.json(schema v2:drives[]+active 多盘档案,旧格式自动迁移)、盘 ID/查重、设置归一化 | `config.go` |
 | errs | 64 | AppError 错误码(CLI/GUI 共用文案映射) | `errs.go` |
 | logging | 58 | slog → KIST_HOME/kist.log,启动轮转留一代 | `logging.go` |
-| cmd/kistctl | 1440 | CLI 壳:18 个子命令、口令获取、参数重排、虚拟路径 | `main.go` |
-| 根 main/app | ~1300 | Wails GUI 壳(Phase 7):31 个绑定方法、事件转发、防抖自动备份、退出前备份;四页面 vue-ts ~2.2k 行(手写 CSS,零新前端依赖) | `app.go`(状态/解锁/生命周期)、`app_browse.go`(浏览/元数据)、`app_transfer.go`(传输/维护)、`main.go`、`frontend/src/` |
+| cmd/kistctl | 1705 | CLI 壳:19 个子命令、口令获取、参数重排、虚拟路径 | `main.go` |
+| 根 main/app | ~1770 | Wails GUI 壳(Phase 7):35 个绑定方法、多盘库生命周期(reopenVaultLocked)、事件转发、防抖自动备份、退出前备份;四页面 vue-ts ~2.4k 行(手写 CSS,零新前端依赖) | `app.go`(状态/解锁/多盘生命周期)、`app_browse.go`(浏览/元数据)、`app_transfer.go`(传输/维护)、`main.go`、`frontend/src/` |
 
 核心代码约 6.8k 行(不含测试,另含 GUI 壳 ~1300 行),全仓 Go 约 12.1k 行。**transfer + index + crypto + dav 四个包占核心的 85%**,掌控它们即掌控项目。
 
@@ -59,18 +59,19 @@ cmd/kistctl(CLI 壳,1440 行)        main.go+app*.go(Wails GUI 壳,Phase 7:31 �
 
 GUI 是纯壳:**零业务逻辑,只编排 internal/***。与 CLI 的关系是同一核心的两个薄壳入口(CLI 的 `loadStore/unlockMK/newManager` helper 在 `app.go` 有同构实现)。
 
-**App 结构**(`app.go`):`mu` 保护 cfg/store/mk/unlocked/backupTimer/lastBackupRev;`db`/`mgr` 在 startup 一次构造视为不可变(`index.ReplaceWith` 原句柄换库,恢复后 Manager 仍有效)。MK 经 `mkSnapshot()` 闭包注入管线,未解锁返回 false → 任务以 LOCKED 失败。
+**App 结构**(`app.go`):`mu` 保护 cfg/store/mk/unlocked/backupTimer/lastBackupRev;`db`/`mgr` 按活动盘构造(TODO-21:换盘 = `reopenVaultLocked` 关旧库开新库 + 重建管线,要求空闲;恢复仍走 `index.ReplaceWith` 原句柄换库)。MK 经 `mkSnapshot()` 闭包注入管线,未解锁返回 false → 任务以 LOCKED 失败。
 
-**绑定分组**(31 个,全部 `defer panicGuard` 防 panic 崩窗口,错误出口统一 `wrap`):
+**绑定分组**(35 个,全部 `defer panicGuard` 防 panic 崩窗口,错误出口统一 `wrap`):
 
 | 分组 | 方法 | 说明 |
 |---|---|---|
-| 状态/解锁 | GetAppState / Get·SaveWebDAVConfig / TestConnection / CreateAccount / Unlock / ImportFromRemote / Lock / ChangePassphrase | AppState 含 HasLocalKeyfile(Lock 页三分支判定);Unlock 的 SuggestPullIndex = 本地空库 + O(1) Probe 远端 index.enc |
+| 状态/解锁 | GetAppState / Get·SaveWebDAVConfig / TestConnection / CreateAccount / Unlock / ImportFromRemote / Lock / ChangePassphrase | AppState 含 HasLocalKeyfile(Lock 页三分支判定)+ 当前盘名/盘数;Unlock 的 SuggestPullIndex = 本地空库 + O(1) Probe 远端 index.enc;CreateAccount 本地已有 keyfile 时走"开新库"分支(推现有 keyfile,口令不符 AUTH_FAILED);ChangePassphrase 多盘扇出 keyfile |
+| 多盘档案(TODO-21) | ListDrives / SaveDrive / DeleteDrive / SetActiveDrive | SaveDrive 编辑活动盘热更新客户端(SetRemote),新增走查重(URL+用户名+根目录);DeleteDrive 拒绝活动盘与最后一个盘,本地索引文件保留;SetActiveDrive 要求管线空闲、切走前尽力补备份、保持解锁态,发 `drive:switched` |
 | 浏览 | ListFolder / SearchAll / FileInfo / GetThumbnail / SetNote / SetUserMeta / DeleteEntries / EnsureFolder / MoveFiles / Get·UpdateFolderMeta | ListFolder 绑定层合成面包屑+条目+FolderSummaries(一次往返);FileDetail 是摊平 NullInt64 的 DTO;UpdateFolderMeta 直传指针语义(nil=不动/零值=清除) |
 | 传输 | PickFiles / PickDir / UploadPaths / DownloadTo / CancelTransfer / Transfers | 对话框在 Go 侧(v2.15 JS 运行时无 Open*Dialog);上传默认 pack、下载默认解压,不暴露 expand/keepZip |
 | 设置/维护 | Get·SaveSettings / BackupIndexNow / PreviewGC / RunGC | GC 两步确认;孤儿只报告 |
 
-**事件接线**:管线的 `Emit` 回调即 `onTransferEvent`——全部事件透传 `runtime.EventsEmit`,其中 `index:changed` 同时驱动壳层防抖备份(App 是转发器+消费者,不经 EventsOn 自我订阅)。startup 事件先于前端订阅即丢失 → 前端 `store.init()` 主动拉初值。
+**事件接线**:管线的 `Emit` 回调即 `onTransferEvent`——全部事件透传 `runtime.EventsEmit`,其中 `index:changed` 同时驱动壳层防抖备份(App 是转发器+消费者,不经 EventsOn 自我订阅)。`drive:switched`(TODO-21)通知前端回根目录、清选择/缩略图/传输列表。startup 事件先于前端订阅即丢失 → 前端 `store.init()` 主动拉初值。
 
 **防抖自动备份**(壳层机制,phase-7 约定):`index:changed` → 重置 30s `time.AfterFunc`(仅 AutoBackup 开且已解锁)→ `BackupNow`(Background+60s 超时,忙则重排不丢变更)→ notify。**退出前备份不受 AutoBackup 限制**:shutdown 时已解锁且 `db.Revision() > lastBackupRev`(会话内追踪,基线=解锁时;`sync_state.last_backup_at` 只存时间不存 revision)则补一次,失败仅记日志。
 
@@ -129,11 +130,11 @@ GUI 是纯壳:**零业务逻辑,只编排 internal/***。与 CLI 的关系是同
 
 | 路径 | 内容 |
 |---|---|
-| config.json | WebDAV 配置 + settings(0600;密码仅显式 opt-in 落盘,那是网盘密码不是口令) |
-| keyfile | 110B 主密钥包装(与远端同一份字节) |
-| index.db | 明文索引(+WAL/SHM) |
+| config.json | 网盘档案(drives[]+active,schema v2)+ settings(0600;密码逐盘仅显式 opt-in 落盘,那是网盘密码不是口令) |
+| keyfile | 110B 主密钥包装(与远端同一份字节;**所有库共用一把**,TODO-21) |
+| index-<盘ID>.db | 明文索引,**每盘一库**(+WAL/SHM;旧单库 index.db 首启自动改名随迁) |
 | outbox/ | 出站箱:待上传加密产物,**有意持久**,push/verify 后清 |
-| backups/ | 被替换/归档的旧索引(`index-<rev>-<ts>.db`) |
+| backups/ | 被替换/归档的旧索引(`index-<rev>-<ts>.db`、开新库归档的 `index-<盘ID>-<ts>.db`) |
 | kist.log | 运行日志(启动时超 5MiB 轮转留一代 .old) |
 
 ## 7. 状态机与账本
@@ -176,6 +177,7 @@ GUI 是纯壳:**零业务逻辑,只编排 internal/***。与 CLI 的关系是同
 15. pack 条目(TODO-15)明文区恰为一个标准 zip;上传校验遍**整次拒绝**坏树(非 UTF-8 名/特殊文件)不留半套索引;解压侧断言(UTF-8/不逃逸)+ 临时目录整体 rename,失败不落半个目录。
 16. 目录元数据(TODO-16)**不继承、不合并、无告警**:tag/作者/note 是目录自身属性,聚合面永不聚合元数据;写在哪个目录就属于哪个目录,kist 不做解释(哑远端约束同款)。
 17. mv 是纯索引操作:改挂点+重名消解单事务,**远端对象零变化**;修改 modified_at 不属于移动(最近更新保持内容语义)。
+18. 一盘一库(TODO-21):索引文件锚定盘 ID,切换=空闲时关库开库+重建管线(保持解锁态,共用 keyfile 同一把 MK);两个档案不得指向同一远端库(URL+用户名+根目录查重),否则两个索引互踩 LWW。
 
 ## 9. 失败模式与恢复路径
 
@@ -207,8 +209,9 @@ GUI 是纯壳:**零业务逻辑,只编排 internal/***。与 CLI 的关系是同
 
 | 命令 | 语义 | 需要口令 | 关键路径 |
 |---|---|---|---|
-| config set | 存 WebDAV 配置 + Ping | 网盘密码 | `cmdConfig` |
-| init | 建 keyfile + 远端初始化(远端已有则拒绝) | ✓ | `cmdInit` |
+| config set | 存当前盘的 WebDAV 配置 + Ping(--name 起名;无档案时创建第一个) | 网盘密码 | `cmdConfig` |
+| drive list/use | 多盘档案:列出 / 切换当前库所在盘(名称/ID/序号;CLI 无常驻管线,无空闲约束) | ✗ | `cmdDrive` |
+| init | 建 keyfile + 远端初始化(远端已有则拒绝;本地已有 keyfile = 开新库推现有密钥) | ✓ | `cmdInit` |
 | unlock | 校验口令 | ✓ | `cmdUnlock` |
 | put [--dest] [--defer] [--expand] | 加密上传(文件夹默认打包)/ 入出站箱 / 逐文件展开 | ✓ | `Manager.UploadPaths/DeferPaths` |
 | outbox list/push/verify/discard | 出站箱搬运与收账 | ✗(纯密文) | `push.go` |
@@ -225,14 +228,15 @@ GUI 是纯壳:**零业务逻辑,只编排 internal/***。与 CLI 的关系是同
 
 注意:两个密码别混——WebDAV 账户密码 vs kist 加密口令(`KIST_PASS` 或 `--pass-stdin`)。`rm` 目前只删文件;目录软删 API(`SoftDeleteFolders`)已有、CLI 无入口(GUI 用)。
 
-## 12. 测试地图(103 项,验收必跑 `go test ./... -race`)
+## 12. 测试地图(115 项,验收必跑 `go test ./... -race`)
 
 | 包 | 数量 | 覆盖要点 |
 |---|---|---|
-| 根(GUI 壳) | 9 | headless 绑定层:codedError 格式、ListFolder 合成(null 归一/摘要批量)、SearchAll 三路命中、路径拆分(`..` 拒绝)、EnsureFolder 幂等+移动落点、删除(软删+trash/目录隐藏/空选拒绝)、元数据指针语义、缩略图 NOT_FOUND 与详情投影;顺带逼出 cover 清除的 FK 缺陷;TODO-17 文件元数据+封面绑定(往返/tag 命中/导入/清除/非图片 BAD_CONFIG/已删拒绝) |
+| 根(GUI 壳) | 13 | headless 绑定层:codedError 格式、ListFolder 合成(null 归一/摘要批量)、SearchAll 三路命中、路径拆分(`..` 拒绝)、EnsureFolder 幂等+移动落点、删除(软删+trash/目录隐藏/空选拒绝)、元数据指针语义、缩略图 NOT_FOUND 与详情投影;TODO-17 文件元数据+封面绑定(往返/tag 命中/导入/清除/非图片 BAD_CONFIG/已删拒绝);TODO-21 多盘生命周期(档案增删/查重/切换锚定盘 ID/开新库推现有 keyfile+AUTH 拒绝/残留索引归档/改口令多盘扇出)——顺手逼出三个真缺陷:查重时序、持锁调 mkSnapshot 自锁、SetActiveDrive 漏赋 active |
+| config | 6 | 空目录默认值、旧格式迁移(承接/落盘钉 ID/幂等)、v2 往返(逐盘密码策略)、normalize(active 悬空回退/ID/RootPath/host 兜底)、查重(含同账号不同根目录允许)、索引路径形态 |
 | crypto | 16 | keyfile 往返/错口令/参数篡改/改口令;blob 往返/篡改/截断/重排/追加/final 冒充/错密钥/v2 填充完整性/流式内存峰值 |
 | dav | 13 | MKCOL 幂等、PUT 定长、503/429 退避、4xx 不重试、ctx 取消、Probe 精确请求与网络错误区分 |
-| index | 26 | 目录树、软删可见性、搜索、revision 并发单调、快照/替换往返、重名消解、pack 列往返;TODO-16:元数据往返/死 tag 清理、目录检索三路命中+软删祖先、子树聚合、封面三级回退(悬空/混合序/截断/留白)、纯索引移动+回滚、元数据经快照存活;TODO-17:文件元数据往返、双形态共享词表的双向死词清理、文件 tag 命中+Tags 回填、v3→v4 升级、文件元数据+手动封面经快照存活 |
+| index | 27 | 目录树、软删可见性、搜索、revision 并发单调、快照/替换往返、重名消解、pack 列往返、库文件迁移(MigrateIndexFile 改名保数据/幂等/目标存在不动);TODO-16:元数据往返/死 tag 清理、目录检索三路命中+软删祖先、子树聚合、封面三级回退(悬空/混合序/截断/留白)、纯索引移动+回滚、元数据经快照存活;TODO-17:文件元数据往返、双形态共享词表的双向死词清理、文件 tag 命中+Tags 回填、v3→v4 升级、文件元数据+手动封面经快照存活 |
 | backup | 6 | 双设备往返、错密钥、无备份、损坏备份、uploading 状态随备份同步 |
 | transfer | 10 | 临时目录清理留痕;打包粒度五形态、校验整次拒绝、zip 往返(空文件/空目录/unicode/mtime)、取消、zip-slip、非 UTF-8 条目 |
 | logging | 2 | 轮转阈值 |
