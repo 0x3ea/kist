@@ -315,17 +315,24 @@ func TestThumbnailNoteUserMeta(t *testing.T) {
 	db := newTestDB(t)
 	id := mustFile(t, db, 1, "照片.jpg", "")
 
-	// 缩略图往返
-	data := []byte{0xFF, 0xD8, 0xFF, 0xE0, 1, 2, 3}
+	// 封面引用往返(TODO-10 出库后:索引只存引用,字节走 blob 管线)
 	err := db.WithTx(func(tx *sql.Tx) error {
-		return db.PutThumbnail(tx, id, data, 512, 384, "image/jpeg")
+		_, err := db.PutCover(tx, CoverRow{
+			FileID: id, BlobName: "cover-blob", Size: 128,
+			Width: 512, Height: 384, Mime: "image/jpeg",
+			Source: CoverCustom, State: CoverReady, CreatedAt: 1,
+		})
+		return err
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
-	got, mime, err := db.GetThumbnail(id)
-	if err != nil || string(got) != string(data) || mime != "image/jpeg" {
-		t.Fatalf("缩略图往返: %v %s %v", got, mime, err)
+	c, err := db.GetReadyCover(id)
+	if err != nil || c.BlobName != "cover-blob" || c.Width != 512 || c.Source != CoverCustom {
+		t.Fatalf("封面引用往返: %+v %v", c, err)
+	}
+	if has, err := db.HasCover(id); err != nil || !has {
+		t.Fatalf("HasCover 应为真: %v %v", has, err)
 	}
 
 	// 备注:写入→可搜索→revision 增加

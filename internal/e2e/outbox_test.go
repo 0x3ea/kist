@@ -158,7 +158,7 @@ func TestOutboxPushSuccess(t *testing.T) {
 	ctx := context.Background()
 	f, src := deferOne(t, e, "重传.bin", 5000)
 
-	if n := e.m.PushPending(ctx, []index.FileRow{f}); n != 1 {
+	if n := e.m.PushPending(ctx, []index.FileRow{f}, nil); n != 1 {
 		t.Fatalf("push 入队 %d,期望 1", n)
 	}
 	if last := lastTr(t, waitIdle(t, e.m)); last.Phase != transfer.PhaseDone {
@@ -194,7 +194,7 @@ func TestOutboxPushFailKeep(t *testing.T) {
 	f, _ := deferOne(t, e, "挂账.bin", 100)
 
 	e.srv.Close() // 模拟网络彻底不可用
-	if n := e.m.PushPending(context.Background(), []index.FileRow{f}); n != 1 {
+	if n := e.m.PushPending(context.Background(), []index.FileRow{f}, nil); n != 1 {
 		t.Fatalf("push 入队 %d,期望 1", n)
 	}
 	if last := lastTr(t, waitIdle(t, e.m)); last.Phase != transfer.PhaseError {
@@ -220,7 +220,7 @@ func TestOutboxPushFailDiscard(t *testing.T) {
 		MK:              func() (crypto.MasterKey, bool) { return crypto.MasterKey{}, false },
 		PushFailDiscard: func() bool { return true },
 	})
-	if n := m2.PushPending(context.Background(), []index.FileRow{f}); n != 1 {
+	if n := m2.PushPending(context.Background(), []index.FileRow{f}, nil); n != 1 {
 		t.Fatalf("push 入队 %d,期望 1", n)
 	}
 	trs := waitIdle(t, m2)
@@ -290,8 +290,8 @@ func TestOutboxDiscardAndUnowned(t *testing.T) {
 	if _, err := os.Stat(transfer.OutboxArtifactPath(f3.BlobName)); !os.IsNotExist(err) {
 		t.Fatal("无主产物应已删除")
 	}
-	_, orphans, err := transfer.RunGC(ctx, e.store, e.db, true)
-	if err != nil || len(orphans) != 0 {
-		t.Fatalf("gc 不应误报孤儿: %+v %v", orphans, err)
+	gcRes, err := transfer.RunGC(ctx, e.store, e.db, true)
+	if err != nil || len(gcRes.Orphans) != 0 {
+		t.Fatalf("gc 不应误报孤儿: %+v %v", gcRes.Orphans, err)
 	}
 }

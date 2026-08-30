@@ -64,6 +64,7 @@ export namespace config {
 	    auto_backup: boolean;
 	    outbox_push_fail: string;
 	    size_padding: string;
+	    cover_cache_mb: number;
 	
 	    static createFrom(source: any = {}) {
 	        return new Settings(source);
@@ -76,6 +77,7 @@ export namespace config {
 	        this.auto_backup = source["auto_backup"];
 	        this.outbox_push_fail = source["outbox_push_fail"];
 	        this.size_padding = source["size_padding"];
+	        this.cover_cache_mb = source["cover_cache_mb"];
 	    }
 	}
 
@@ -411,6 +413,7 @@ export namespace main {
 	export class GCReport {
 	    TrashOrDeleted: string[];
 	    Orphans: string[];
+	    CoverOrphans: string[];
 	    DryRun: boolean;
 	
 	    static createFrom(source: any = {}) {
@@ -421,6 +424,7 @@ export namespace main {
 	        if ('string' === typeof source) source = JSON.parse(source);
 	        this.TrashOrDeleted = source["TrashOrDeleted"];
 	        this.Orphans = source["Orphans"];
+	        this.CoverOrphans = source["CoverOrphans"];
 	        this.DryRun = source["DryRun"];
 	    }
 	}

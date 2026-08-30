@@ -37,8 +37,8 @@ go build ./... && go vet ./... && gofmt -l . && go test ./... -race -count=1
 ```
 internal/crypto   加密核心(keyfile/blob 流式分块;v2 大小量化填充)
 internal/dav      WebDAV 客户端 + 重试退避(PUT/GET 自管,其余 gowebdav)
-internal/index    SQLite 明文索引(虚拟目录/文件/备注/缩略图/revision)
-internal/remote   远端对象语义(/kist/ 下随机名 blob + keyfile + index.enc)
+internal/index    SQLite 明文索引(虚拟目录/文件/备注/封面引用/revision)
+internal/remote   远端对象语义(/kist/ 主命名空间随机名 blob + keyfile + index.enc;/kist/covers/ 封面子命名空间)
 internal/transfer 传输管线(并发/进度/取消)+ 文件夹打包(一话一对象,TODO-15)+ 缩略图生成 + gc + 出站箱(--defer/push/verify)
 internal/backup   索引云备份与多设备恢复(LWW)
 internal/config   KIST_HOME 路径与 config.json
@@ -49,7 +49,8 @@ internal/migrate  网盘间纯密文迁移(枚举/断点搬运/双端校验)
 ```
 
 - 进度上报走 `transfer.Deps.Emit` 回调:CLI 接 `fmt.Printf`,GUI 接 Wails `EventsEmit`,核心代码不感知 UI
-- 远端布局永远扁平:网盘上看不到文件名/目录结构,映射只存在本地索引
+- 远端两命名空间(TODO-10 起,有意破例于"永远扁平"):`/kist/` 主命名空间扁平随机名 blob + keyfile + index.enc,`/kist/covers/` 封面子命名空间;两侧都零明文元数据,映射只存在本地索引
+- 封面字节走 blob 管线(TODO-10):索引只存 covers 轻引用 + source(derived/custom)+ state(uploading 不可见);引用与 blobs 登记同事务,自动封面不额外计 revision,替换/清除时旧 blob 同事务 trash
 
 ## 关键机制与坑(实测踩过)
 

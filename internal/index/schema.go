@@ -2,7 +2,31 @@ package index
 
 // migrations 按版本顺序排列,由 db.migrate() 按 PRAGMA user_version 逐个应用。
 // 结构变更时只允许追加新脚本,不得修改历史脚本(老库要靠它们升级)。
-var migrations = []string{v1Schema, v2AddPack, v3FolderMeta, v4FileTags}
+var migrations = []string{v1Schema, v2AddPack, v3FolderMeta, v4FileTags, v5Covers}
+
+// v5(TODO-10):封面出库——封面字节不再持有于 thumbnails.data,改为
+// 「一封面一 blob」+ 轻引用。thumbnails 表保留为 legacy 只读回退
+// (covers migrate 清空后闲置,历史脚本不可改,故原定义留在 v1);
+// 写入方已全部迁移到 covers,靠"删掉 PutThumbnail/DeleteThumbnail"兜底。
+//   - source:derived(上传自动生成,可再生的派生缓存)| custom(GUI 导入,
+//     不可再生的用户内容)——gc 分叉的依据;迁移回填行一律记 custom
+//     (legacy 行无法区分来源,按用户数据保守保护)。
+//   - state:uploading(出站箱挂账,产物未上远端)| ready——未 ready 的
+//     引用对外不可见(GetReadyCover/HasCover/summary 全部过滤),否则会去
+//     远端拉一个尚不存在的对象。
+const v5Covers = `
+CREATE TABLE IF NOT EXISTS covers (
+  file_id    INTEGER PRIMARY KEY REFERENCES files(id) ON DELETE CASCADE,
+  blob_name  TEXT    NOT NULL UNIQUE,   -- 远端 /kist/covers/ 对象名(32hex)
+  size       INTEGER NOT NULL,          -- 密文大小(读侧长度总校验用)
+  width      INTEGER NOT NULL,
+  height     INTEGER NOT NULL,
+  mime       TEXT    NOT NULL,
+  source     TEXT    NOT NULL,          -- derived|custom
+  state      TEXT    NOT NULL,          -- uploading|ready
+  created_at INTEGER NOT NULL);
+
+CREATE INDEX IF NOT EXISTS ix_covers_state ON covers(state);`
 
 // v2(TODO-15):files.pack 标记"目录打包条目"——明文区是一个 zip,
 // get 侧解压还原成文件夹。size 记量化后的明文区总长(显示值,

@@ -2,24 +2,56 @@
 // CardGrid.vue — 网格视图:目录卡 = 封面宫格 + 名称 + 摘要;文件卡 = 缩略图
 // 或类型占位 + 名称 + 大小。封面链已由索引层解析为 CoverFileIDs(≤4),
 // 自定义封面 = 单值满铺,由 CoverMosaic 按格数自适应。
+// TODO-10 出库后封面可能走网络:全量预取改为 IntersectionObserver 可见优先
+// (rootMargin 提前 200px ≈ 预取一屏),实际并发由 store 的有界队列限制。
 import { index } from '../../wailsjs/go/models'
 import { store, ensureThumb, openDetail, summaryText } from '../store'
 import { humanSize } from '../format'
 import CoverMosaic from './CoverMosaic.vue'
-import { onMounted, watchEffect } from 'vue'
+import { onBeforeUnmount, onMounted } from 'vue'
 
 defineEmits<{ open: [id: number]; menu: [e: MouseEvent, entry: index.Entry] }>()
 
-// 有缩略图的文件卡预取缩略图(负缓存下不反复请求)
-watchEffect(() => {
-  for (const e of store.folder.entries) {
-    if (!e.IsFolder) ensureThumb(e.ID)
+let io: IntersectionObserver | null = null
+const pendingFetch = new Map<Element, () => void>()
+
+// ref 回调工厂:登记卡片元素与"该卡可见时要取哪些封面"
+function registerCard(e: index.Entry) {
+  return (el: unknown) => {
+    const elc = el as Element | null
+    if (!elc || !io || pendingFetch.has(elc)) return
+    const fetch = () => {
+      if (e.IsFolder) {
+        for (const id of store.folder.summaries[String(e.ID)]?.CoverFileIDs ?? []) {
+          if (id) ensureThumb(id)
+        }
+      } else {
+        ensureThumb(e.ID)
+      }
+    }
+    pendingFetch.set(elc, fetch)
+    io.observe(elc)
   }
-})
+}
+
 onMounted(() => {
-  for (const e of store.folder.entries) {
-    if (e.IsFolder) (store.folder.summaries[String(e.ID)]?.CoverFileIDs ?? []).forEach((id) => id && ensureThumb(id))
-  }
+  io = new IntersectionObserver(
+    (ents) => {
+      for (const en of ents) {
+        if (!en.isIntersecting) continue
+        pendingFetch.get(en.target)?.()
+        pendingFetch.delete(en.target)
+        io?.unobserve(en.target)
+      }
+    },
+    { rootMargin: '200px' }
+  )
+})
+
+onBeforeUnmount(() => {
+  io?.disconnect()
+  io = null
+  pendingFetch.clear()
 })
 
 function toggleFile(id: number) {
@@ -38,6 +70,7 @@ function cardClick(e: index.Entry) {
     <div
       v-for="e in store.folder.entries"
       :key="e.ID"
+      :ref="registerCard(e)"
       class="card"
       :class="{ sel: e.IsFolder ? store.folderSelection.has(e.ID) : store.selection.has(e.ID) }"
       @click="e.IsFolder ? $emit('open', e.ID) : cardClick(e)"

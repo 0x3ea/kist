@@ -25,12 +25,12 @@ type FolderSummary struct {
 	CoverFileIDs []int64 // 封面三级回退链解析结果,≤4;0 = 该格渲染默认占位
 }
 
-// sumTree 是一次聚合查询的全部上下文:目录树、活跃文件索引、缩略图占有集。
+// sumTree 是一次聚合查询的全部上下文:目录树、活跃文件索引、封面占有集。
 type sumTree struct {
 	root   *sumNode
 	byID   map[int64]*sumNode  // 活跃目录索引(含根)
 	files  map[int64]*fileLite // 活跃文件索引(封面引用悬空判定用)
-	thumbs map[int64]bool      // 有缩略图的 fileID 集
+	covers map[int64]bool      // 有封面的 fileID 集(ready covers ∪ legacy thumbnails)
 }
 
 // sumNode 是聚合用的内存树节点:只含活跃目录;祖先被软删的整支不参与
@@ -132,23 +132,26 @@ func (db *DB) buildTree() (*sumTree, error) {
 		sort.Slice(n.children, func(i, j int) bool { return n.children[i].name < n.children[j].name })
 	}
 
-	thumbs, err := db.Query(`SELECT file_id FROM thumbnails`)
+	coverRows2, err := db.Query(
+		`SELECT file_id FROM covers WHERE state = 'ready'
+		 UNION
+		 SELECT file_id FROM thumbnails`)
 	if err != nil {
 		return nil, err
 	}
-	defer thumbs.Close()
-	thumbSet := map[int64]bool{}
-	for thumbs.Next() {
+	defer coverRows2.Close()
+	coverSet := map[int64]bool{}
+	for coverRows2.Next() {
 		var id int64
-		if err := thumbs.Scan(&id); err != nil {
+		if err := coverRows2.Scan(&id); err != nil {
 			return nil, err
 		}
-		thumbSet[id] = true
+		coverSet[id] = true
 	}
-	if err := thumbs.Err(); err != nil {
+	if err := coverRows2.Err(); err != nil {
 		return nil, err
 	}
-	return &sumTree{root: root, byID: nodes, files: fileIndex, thumbs: thumbSet}, nil
+	return &sumTree{root: root, byID: nodes, files: fileIndex, covers: coverSet}, nil
 }
 
 // agg 是自底向上的纯计数;封面链独立于计数单独解析。
@@ -248,9 +251,9 @@ func (db *DB) FolderSummaries(ids []int64) (map[int64]FolderSummary, error) {
 //  3. 默认四格:无任何子条目时返回空切片,由渲染端按目录名 hash 稳定挑内置占位图,
 //     渲染期决定、零存储。
 func (t *sumTree) resolveCover(n *sumNode, memo map[int64][]int64, repMemo map[int64]int64) []int64 {
-	// 第 1 级:cover_file_id 有效(活跃 + 有缩略图)即单图满铺
+	// 第 1 级:cover_file_id 有效(活跃 + 有封面)即单图满铺
 	if n.cover > 0 {
-		if f := t.files[n.cover]; f != nil && t.thumbs[f.id] {
+		if f := t.files[n.cover]; f != nil && t.covers[f.id] {
 			return []int64{n.cover}
 		}
 		// 引用悬空:继续走派生级
@@ -270,7 +273,7 @@ func (t *sumTree) resolveCover(n *sumNode, memo map[int64][]int64, repMemo map[i
 	slots := make([]slot, 0, len(n.children)+len(n.files))
 	for _, f := range n.files {
 		id := int64(0)
-		if t.thumbs[f.id] {
+		if t.covers[f.id] {
 			id = f.id
 		}
 		slots = append(slots, slot{name: f.name, id: id})
@@ -291,7 +294,7 @@ func (t *sumTree) resolveCover(n *sumNode, memo map[int64][]int64, repMemo map[i
 }
 
 // representative 找目录的"代表文件":自定义封面优先,否则先本目录文件、
-// 再子目录递归(各自名称序,先文件后目录的先序),取第一个有缩略图的文件;
+// 再子目录递归(各自名称序,先文件后目录的先序),取第一个有封面的文件;
 // 都没有则 0。纯名称序保证两次解析结果一致,与扫描定序同理。
 func (t *sumTree) representative(n *sumNode, memo map[int64]int64) int64 {
 	if id, ok := memo[n.id]; ok {
@@ -299,13 +302,13 @@ func (t *sumTree) representative(n *sumNode, memo map[int64]int64) int64 {
 	}
 	id := int64(0)
 	if n.cover > 0 {
-		if f := t.files[n.cover]; f != nil && t.thumbs[f.id] {
+		if f := t.files[n.cover]; f != nil && t.covers[f.id] {
 			id = n.cover
 		}
 	}
 	if id == 0 {
 		for _, f := range n.files {
-			if t.thumbs[f.id] {
+			if t.covers[f.id] {
 				id = f.id
 				break
 			}

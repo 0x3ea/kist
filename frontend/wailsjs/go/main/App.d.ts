@@ -26,13 +26,13 @@ export function FileInfo(arg1:number):Promise<main.FileDetail>;
 
 export function GetAppState():Promise<main.AppState>;
 
+export function GetCover(arg1:number):Promise<main.ThumbData>;
+
 export function GetFileMeta(arg1:number):Promise<index.FileMeta>;
 
 export function GetFolderMeta(arg1:number):Promise<index.FolderMeta>;
 
 export function GetSettings():Promise<config.Settings>;
-
-export function GetThumbnail(arg1:number):Promise<main.ThumbData>;
 
 export function GetWebDAVConfig():Promise<main.WebDAVConfig>;
 
@@ -68,7 +68,7 @@ export function SearchAll(arg1:string,arg2:number):Promise<main.SearchView>;
 
 export function SetActiveDrive(arg1:string):Promise<void>;
 
-export function SetFileCover(arg1:number,arg2:string):Promise<void>;
+export function SetFileCover(arg1:number,arg2:string):Promise<boolean>;
 
 export function SetNote(arg1:number,arg2:string):Promise<void>;
 

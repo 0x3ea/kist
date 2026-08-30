@@ -46,6 +46,7 @@ const usageText = `用法:kistctl <子命令> [参数]
   unlock  --pass-stdin                  校验口令(本地 keyfile 优先,无则拉远端)
   put     <路径...> [--dest /目录] [--defer] [--expand] --pass-stdin  加密上传(文件夹默认按叶子目录打包,一话一对象;--expand 逐文件;--defer 只入出站箱)
   outbox  list|push|verify|discard       出站箱:待上传产物的搬运与收账(TODO-13)
+  covers  migrate [--dry-run] [--max N] --pass-stdin  存量缩略图一次性出库为封面 blob(需要口令与网络;断点续跑,可 --max 分批)
   ls      [/路径]                        列虚拟目录(目录行附子树摘要:话数·大小·最近更新)
   search  <关键词>                       搜索文件名、备注、目录名与目录 tag
   meta    set <目录|文件> [--note 文本] [--tag a,b] [--cover <uuid|id|0>(仅目录)]  设置元数据(不带 flag 则显示当前值);meta list 列出全部
@@ -53,7 +54,7 @@ const usageText = `用法:kistctl <子命令> [参数]
   mkdir   /路径                          建虚拟目录(多级、幂等;纯索引零流量,先建目录再往里 put)
   rename  /路径 新名                     重命名目录(纯索引零流量;同名幂等,撞名报错)
   get     <uuid|id> --to <目录> [--keep-zip] --pass-stdin  下载解密(文件夹条目还原成目录;--keep-zip 落 zip)
-  info    <uuid|id>                      查看明细(时间/备注/缩略图)
+  info    <uuid|id>                      查看明细(时间/备注/封面)
   note    <id> [--set 文本]              查看/设置备注
   rm      <id...>                        软删除文件
   gc      [--dry-run]                    清理 trash blob、报告孤儿
@@ -92,6 +93,8 @@ func run(args []string) error {
 		err = cmdPut(rest)
 	case "outbox":
 		err = cmdOutbox(rest)
+	case "covers":
+		err = cmdCovers(rest)
 	case "ls":
 		err = cmdLs(rest)
 	case "search":
@@ -707,8 +710,27 @@ func cmdOutboxList(args []string) error {
 		}
 		fmt.Printf("%s\t%s\t密文 %d 字节%s\n", f.BlobName, filePathOf(db, f), f.CipherSize, mark)
 	}
+	// 封面挂账(TODO-10):与文件账同进退,单独列出防"看不见的待上传"
+	covers, err := db.ListUploadingCovers()
+	if err != nil {
+		return errs.From(err)
+	}
+	for _, c := range covers {
+		mark := ""
+		if st, err := os.Stat(transfer.OutboxArtifactPath(c.BlobName)); err != nil {
+			mark = "  [本地产物缺失!]"
+		} else {
+			total += st.Size()
+		}
+		owner := c.BlobName
+		if row, err := db.GetFile(c.FileID); err == nil {
+			owner = filePathOf(db, row)
+		}
+		fmt.Printf("%s\t封面(%s)\t密文 %d 字节%s\n", c.BlobName, owner, c.Size, mark)
+	}
+	n := len(files) + len(covers)
 	fmt.Printf("共 %d 个待上传,本地产物占用 %d 字节;手工搬运 = 把产物文件名保持原样上传到远端 %s 后执行 outbox verify\n",
-		len(files), total, cfgRootPath())
+		n, total, cfgRootPath())
 	return nil
 }
 
@@ -760,7 +782,11 @@ func cmdOutboxPush(args []string) error {
 		Concurrency:     func() int { return cfg.Settings.Concurrency },
 		PushFailDiscard: func() bool { return cfg.Settings.OutboxPushFail == "discard" },
 	})
-	n := m.PushPending(context.Background(), files)
+	covers, err := db.ListUploadingCovers()
+	if err != nil {
+		return errs.From(err)
+	}
+	n := m.PushPending(context.Background(), files, covers)
 	fmt.Printf("已入队 %d 个 push\n", n)
 	if fails := waitAndReport(m); fails > 0 {
 		if cfg.Settings.OutboxPushFail == "discard" {
@@ -1060,7 +1086,8 @@ func cmdMetaSet(args []string) error {
 }
 
 // metaSetFile 文件元数据(TODO-17):--note/--tag 语义与目录侧一致;
-// --cover 仅目录——文件封面是自身的缩略图行,导入/清除是 GUI 元数据面板的
+// --cover 仅目录——文件封面是自身 covers 引用行(TODO-10 出库后字节走
+// blob 管线),导入/清除是 GUI 元数据面板的
 // 对话框操作,CLI 不设等价 flag(真有需要再加 --cover-file)。
 func metaSetFile(db *index.DB, target string, fs *flag.FlagSet, note, tag *string) error {
 	f, err := resolveTarget(db, target)
@@ -1153,13 +1180,13 @@ func resolveCoverRef(db *index.DB, v string) (int64, error) {
 }
 
 // checkCoverFile 校验封面引用的文件可用:已软删的拒绝;
-// 无缩略图放行但提示——封面第 1 级要求有缩略图,否则渲染端会回退派生拼贴。
+// 无封面放行但提示——封面第 1 级要求目标有封面,否则渲染端会回退派生拼贴。
 func checkCoverFile(db *index.DB, f index.FileRow) (int64, error) {
 	if f.DeletedAt.Valid {
 		return 0, errs.New(errs.BadConfig, "封面文件已删除:"+f.Name)
 	}
-	if _, _, err := db.GetThumbnail(f.ID); err != nil {
-		fmt.Printf("提示:%s 没有缩略图,封面将回退为派生拼贴\n", f.Name)
+	if has, err := db.HasCover(f.ID); err == nil && !has {
+		fmt.Printf("提示:%s 没有封面,引用将回退为派生拼贴\n", f.Name)
 	}
 	return f.ID, nil
 }
@@ -1391,10 +1418,10 @@ func cmdInfo(args []string) error {
 	fmt.Printf("加密于: %s\n", unixOrDash(f.EncryptedAt.Int64, f.EncryptedAt.Valid))
 	fmt.Printf("上传于: %s\n", unixOrDash(f.UploadedAt.Int64, f.UploadedAt.Valid))
 	fmt.Printf("备注:   %s\n", orDash(f.Note.String, f.Note.Valid))
-	if _, _, err := db.GetThumbnail(f.ID); err == nil {
-		fmt.Println("缩略图: 有")
+	if has, err := db.HasCover(f.ID); err == nil && has {
+		fmt.Println("封面: 有")
 	} else {
-		fmt.Println("缩略图: 无")
+		fmt.Println("封面: 无")
 	}
 	return nil
 }
@@ -1506,6 +1533,13 @@ func cmdRm(args []string) error {
 	if err := db.SoftDeleteFiles(ids); err != nil {
 		return errs.From(err)
 	}
+	// 封面 blob 随文件一并 trash(TODO-10);与 SoftDeleteFiles 分属两个
+	// 事务,中途失败留孤儿只会被 gc 报告,不会误删——与文件 blob 同款边界
+	coverNames, err := db.CoverBlobNamesOf(ids)
+	if err != nil {
+		return errs.From(err)
+	}
+	blobNames = append(blobNames, coverNames...)
 	if err := db.MarkBlobTrash(blobNames); err != nil {
 		return errs.From(err)
 	}
@@ -1528,21 +1562,112 @@ func cmdGc(args []string) error {
 		return err
 	}
 	defer db.Close()
-	deleted, orphans, err := transfer.RunGC(context.Background(), store, db, *dryRun)
+	res, err := transfer.RunGC(context.Background(), store, db, *dryRun)
 	if err != nil {
 		return errs.From(err)
 	}
-	if len(deleted) == 0 && len(orphans) == 0 {
+	if len(res.Deleted) == 0 && len(res.Orphans) == 0 && len(res.CoverOrphans) == 0 {
 		fmt.Println("无需清理")
 		return nil
 	}
 	if *dryRun {
-		fmt.Printf("试运行:将删除 %d 个 trash blob,发现 %d 个孤儿\n", len(deleted), len(orphans))
-	} else if len(deleted) > 0 {
-		fmt.Printf("已删除 %d 个 trash blob\n", len(deleted))
+		fmt.Printf("试运行:将删除 %d 个 trash blob,发现 %d 个孤儿、%d 个封面孤儿\n",
+			len(res.Deleted), len(res.Orphans), len(res.CoverOrphans))
+	} else if len(res.Deleted) > 0 {
+		fmt.Printf("已删除 %d 个 trash blob\n", len(res.Deleted))
 	}
-	for _, n := range orphans {
+	for _, n := range res.Orphans {
 		fmt.Printf("孤儿(远端有、索引无,未删除): %s\n", n)
+	}
+	for _, n := range res.CoverOrphans {
+		fmt.Printf("封面孤儿(covers/ 下远端有、索引无,未删除): %s\n", n)
+	}
+	return nil
+}
+
+// cmdCovers 封面运维子命令(TODO-10):migrate 把 legacy 缩略图出库。
+func cmdCovers(args []string) error {
+	if len(args) == 0 {
+		return errs.New(errs.BadConfig, "用法:kistctl covers migrate [--dry-run] [--max N] --pass-stdin")
+	}
+	switch args[0] {
+	case "migrate":
+		return cmdCoversMigrate(args[1:])
+	default:
+		return errs.New(errs.BadConfig, "未知 covers 子命令 "+args[0]+"(可用:migrate)")
+	}
+}
+
+// cmdCoversMigrate 存量缩略图一次性出库:实跑需要口令(加密封面 blob)与
+// 网络(逐行 PUT);--dry-run 是纯本地统计,不要口令不连网。受网盘限速
+// (~100 请求/分钟)是长时间任务:支持断点续跑(已迁移行自动跳过)与
+// --max 分批。GUI 若同开一库,请先退出再跑(结尾 VACUUM 需要)。
+func cmdCoversMigrate(args []string) error {
+	fs := flag.NewFlagSet("covers migrate", flag.ContinueOnError)
+	dryRun := fs.Bool("dry-run", false, "只统计待迁移行数与体积(纯本地,不要口令)")
+	maxN := fs.Int("max", 0, "本次最多迁移 N 行(0 = 不限),配合限速分批跑")
+	passStdin := passStdinFlag(fs)
+	if err := parseArgs(fs, args); err != nil {
+		return err
+	}
+
+	db, err := openIndex()
+	if err != nil {
+		return err
+	}
+	defer db.Close()
+
+	var store *remote.Store
+	var mk crypto.MasterKey
+	if !*dryRun {
+		_, store, err = loadStore()
+		if err != nil {
+			return err
+		}
+		pass, err := readPass(*passStdin)
+		if err != nil {
+			return err
+		}
+		if mk, err = unlockMK(store, pass); err != nil {
+			return err
+		}
+	}
+
+	sizeBefore := int64(-1)
+	if st, err := os.Stat(db.Path); err == nil {
+		sizeBefore = st.Size()
+	}
+
+	res, err := transfer.MigrateLegacyCovers(context.Background(), store, db, mk,
+		*dryRun, *maxN, func(done, total int) {
+			fmt.Printf("\r迁移进度 %d/%d", done, total)
+			if done == total {
+				fmt.Println()
+			}
+		})
+	if err != nil {
+		return errs.From(err)
+	}
+	if *dryRun {
+		fmt.Printf("待迁移 %d 行,共 %.1f MiB(每行 1 次上传请求;按 ~100 请求/分钟估算约 %.0f 分钟)\n",
+			res.Total, float64(res.Bytes)/(1<<20), float64(res.Total)/100.0)
+		fmt.Println("确认后执行:kistctl covers migrate --pass-stdin(--max N 可分批)")
+		return nil
+	}
+	fmt.Printf("迁移完成:出库 %d 行,跳过 %d 行(已出库),清除软删遗留 %d 行,失败 %d 行\n",
+		res.Migrated, res.Skipped, res.Deleted, res.Failed)
+	for _, f := range res.Failures {
+		fmt.Printf("  ✗ %s(重跑 covers migrate 会自动重试)\n", f)
+	}
+	if st, err := os.Stat(db.Path); err == nil && sizeBefore >= 0 {
+		fmt.Printf("索引库体积:%.2f MiB → %.2f MiB(VACUUM 回收封面字节空间)\n",
+			float64(sizeBefore)/(1<<20), float64(st.Size())/(1<<20))
+	}
+	if res.Migrated > 0 {
+		fmt.Println("已计入一次 revision,建议 kistctl backup 把封面引用同步到远端")
+	}
+	if res.Failed > 0 {
+		return errs.New(errs.Internal, fmt.Sprintf("%d 行迁移失败,重跑可续传", res.Failed))
 	}
 	return nil
 }

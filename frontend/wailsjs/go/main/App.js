@@ -42,6 +42,10 @@ export function GetAppState() {
   return window['go']['main']['App']['GetAppState']();
 }
 
+export function GetCover(arg1) {
+  return window['go']['main']['App']['GetCover'](arg1);
+}
+
 export function GetFileMeta(arg1) {
   return window['go']['main']['App']['GetFileMeta'](arg1);
 }
@@ -52,10 +56,6 @@ export function GetFolderMeta(arg1) {
 
 export function GetSettings() {
   return window['go']['main']['App']['GetSettings']();
-}
-
-export function GetThumbnail(arg1) {
-  return window['go']['main']['App']['GetThumbnail'](arg1);
 }
 
 export function GetWebDAVConfig() {

@@ -146,7 +146,7 @@ func (a *App) GetSettings() config.Settings {
 	if a.cfg != nil {
 		return a.cfg.Settings
 	}
-	return config.Settings{Concurrency: 2, ChunkMiB: 4, OutboxPushFail: "keep", SizePadding: "on"}
+	return config.Settings{Concurrency: 2, ChunkMiB: 4, OutboxPushFail: "keep", SizePadding: "on", CoverCacheMB: 512}
 }
 
 // SaveSettings 保存行为偏好(并发/块大小对进行中传输的下一任务生效,
@@ -199,10 +199,12 @@ func (a *App) BackupIndexNow() (info backup.BackupInfo, err error) {
 }
 
 // GCReport 孤儿清理报告:TrashOrDeleted 在预览时是待删清单、实跑时是已删清单;
-// Orphans(远端有、索引无)只报告不删——删除孤儿需要用户确认语义,本期不做。
+// Orphans(远端有、索引无)与 CoverOrphans(covers/ 命名空间同款,TODO-10)
+// 只报告不删——删除孤儿需要用户确认语义,本期不做。
 type GCReport struct {
 	TrashOrDeleted []string
 	Orphans        []string
+	CoverOrphans   []string
 	DryRun         bool
 }
 
@@ -232,15 +234,18 @@ func (a *App) runGC(dryRun bool) (GCReport, error) {
 	if err != nil {
 		return GCReport{}, err
 	}
-	deleted, orphans, err := transfer.RunGC(a.callCtx(), store, db, dryRun)
+	res, err := transfer.RunGC(a.callCtx(), store, db, dryRun)
 	if err != nil {
 		return GCReport{}, err
 	}
-	if deleted == nil {
-		deleted = []string{}
+	if res.Deleted == nil {
+		res.Deleted = []string{}
 	}
-	if orphans == nil {
-		orphans = []string{}
+	if res.Orphans == nil {
+		res.Orphans = []string{}
 	}
-	return GCReport{TrashOrDeleted: deleted, Orphans: orphans, DryRun: dryRun}, nil
+	if res.CoverOrphans == nil {
+		res.CoverOrphans = []string{}
+	}
+	return GCReport{TrashOrDeleted: res.Deleted, Orphans: res.Orphans, CoverOrphans: res.CoverOrphans, DryRun: dryRun}, nil
 }

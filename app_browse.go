@@ -165,7 +165,7 @@ func (a *App) FileInfo(fileID int64) (d FileDetail, err error) {
 	} else {
 		d.Tags = []string{} // 读不到不致命:详情以文件行为主
 	}
-	if _, _, terr := db.GetThumbnail(fileID); terr == nil {
+	if has, herr := db.HasCover(fileID); herr == nil && has {
 		d.HasThumb = true
 	}
 	return d, nil
@@ -177,19 +177,51 @@ type ThumbData struct {
 	Mime string
 }
 
-// GetThumbnail 取缩略图;无缩略图返回 NOT_FOUND(前端据此显示占位图)。
-func (a *App) GetThumbnail(fileID int64) (t ThumbData, err error) {
+// GetCover 取文件封面(TODO-10 出库后,替代 GetThumbnail):
+// 磁盘 LRU 缓存(KIST_HOME/covers/<uuid>.<ext>)→ 未命中从远端 covers
+// 命名空间拉取解密(需解锁,锁定报 [LOCKED])→ 原子写缓存;无 covers
+// 引用时回退 legacy thumbnails 直读(零网络,迁移完成前的过渡);
+// 两者皆无返回 NOT_FOUND(前端据此显示占位图)。
+func (a *App) GetCover(fileID int64) (t ThumbData, err error) {
 	defer a.panicGuard(&err)
 	db, err := a.requireDB()
 	if err != nil {
 		return t, a.wrap(err)
 	}
-	data, mime, err := db.GetThumbnail(fileID)
+	f, err := db.GetFile(fileID)
 	if err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
-			return t, a.wrap(errs.New(errs.NotFound, "该文件没有缩略图"))
-		}
 		return t, a.wrap(errs.From(err))
+	}
+	if cov, err := db.GetReadyCover(fileID); err == nil {
+		// 缓存键 = 文件 uuid:多盘共库(TODO-21)时数字 fileID 会撞
+		cacheKey := f.UUID + extForMime(cov.Mime)
+		if data, rerr := readCoverCache(cacheKey); rerr == nil {
+			return ThumbData{Data: data, Mime: cov.Mime}, nil
+		}
+		// 未命中:拉远端(先字节后展示;解开校验过才落缓存)
+		mk, ok := a.mkSnapshot()
+		if !ok {
+			return t, a.wrap(errs.New(errs.Locked, "封面未缓存:解锁后可从远端获取"))
+		}
+		store, serr := a.requireStore()
+		if serr != nil {
+			return t, a.wrap(serr)
+		}
+		data, ferr := fetchCoverBlob(a.callCtx(), store, mk, cov.BlobName, cov.Size)
+		if ferr != nil {
+			return t, a.wrap(errs.From(ferr))
+		}
+		writeCoverCache(cacheKey, data)
+		a.enforceCoverCacheLRU()
+		return ThumbData{Data: data, Mime: cov.Mime}, nil
+	}
+	// 无 ready 引用:legacy 回退(纯索引,零网络)
+	data, mime, lerr := db.GetLegacyThumbnail(fileID)
+	if lerr != nil {
+		if errors.Is(lerr, sql.ErrNoRows) {
+			return t, a.wrap(errs.New(errs.NotFound, "该文件没有封面"))
+		}
+		return t, a.wrap(errs.From(lerr))
 	}
 	return ThumbData{Data: data, Mime: mime}, nil
 }
@@ -246,6 +278,12 @@ func (a *App) DeleteEntries(fileIDs, folderIDs []int64) (err error) {
 		if err := db.SoftDeleteFiles(fileIDs); err != nil {
 			return a.wrap(errs.From(err))
 		}
+		// 封面 blob 随文件一并 trash(TODO-10,与 CLI rm 同款两事务边界)
+		coverNames, err := db.CoverBlobNamesOf(fileIDs)
+		if err != nil {
+			return a.wrap(errs.From(err))
+		}
+		blobNames = append(blobNames, coverNames...)
 		if err := db.MarkBlobTrash(blobNames); err != nil {
 			return a.wrap(errs.From(err))
 		}
@@ -381,43 +419,49 @@ func (a *App) UpdateFileMeta(fileID int64, u index.FileMetaUpdate) (err error) {
 	return nil
 }
 
-// SetFileCover 导入本地图片作为文件封面(TODO-17):与上传缩略图同一管线
-// 同一规格(transfer.MakeThumbnail)。localPath 空串 = 清除封面——文件侧
-// 的清除是删 thumbnails 行,与目录侧的 cover_file_id 置 NULL 不同。
+// SetFileCover 导入/清除文件封面(TODO-17 立项;TODO-10 出库后字节走
+// blob 管线)。与上传缩略图同一管线同一规格(transfer.MakeThumbnail)。
+// localPath 空串 = 清除封面(纯索引:删 covers 引用,旧 blob 同事务 trash,
+// 物理删除交给 gc)。导入 = 加密 PUT 到 covers 命名空间,计 revision;
+// 远端不可达自动回退出站箱(deferred=true),用户内容不静默丢弃。
 // 非图片/坏图在这里是显式用户动作:错误上抛不静默(上传管线才会忽略)。
-// pack 注意:覆盖会顶掉上传时自动保存的首页缩略图,清除后不恢复。
-func (a *App) SetFileCover(fileID int64, localPath string) (err error) {
+// pack 注意:覆盖会顶掉上传时自动生成的首页封面,清除后不恢复。
+func (a *App) SetFileCover(fileID int64, localPath string) (deferred bool, err error) {
 	defer a.panicGuard(&err)
 	db, err := a.requireDB()
 	if err != nil {
-		return a.wrap(err)
+		return false, a.wrap(err)
 	}
 	f, err := db.GetFile(fileID)
 	if err != nil {
-		return a.wrap(errs.From(err))
+		return false, a.wrap(errs.From(err))
 	}
 	if f.DeletedAt.Valid {
-		return a.wrap(errs.New(errs.NotFound, "文件已删除:"+f.Name))
+		return false, a.wrap(errs.New(errs.NotFound, "文件已删除:"+f.Name))
+	}
+	mgr, err := a.requireMgr()
+	if err != nil {
+		return false, a.wrap(err)
 	}
 	if localPath == "" {
-		if err := db.WithTx(func(tx *sql.Tx) error {
-			return db.DeleteThumbnail(tx, fileID)
-		}); err != nil {
-			return a.wrap(errs.From(err))
+		if err := mgr.ClearCoverFile(fileID); err != nil {
+			return false, a.wrap(errs.From(err))
 		}
 	} else {
 		td, err := transfer.MakeThumbnail(localPath)
 		if err != nil {
-			return a.wrap(errs.New(errs.BadConfig, "封面导入失败:"+err.Error()))
+			return false, a.wrap(errs.New(errs.BadConfig, "封面导入失败:"+err.Error()))
 		}
-		if err := db.WithTx(func(tx *sql.Tx) error {
-			return db.PutThumbnail(tx, fileID, td.Data, td.W, td.H, td.Mime)
-		}); err != nil {
-			return a.wrap(errs.From(err))
+		if deferred, err = mgr.ImportCover(a.callCtx(), f, td); err != nil {
+			return false, a.wrap(errs.From(err))
 		}
 	}
-	a.emitIndexChanged("meta")
-	return nil
+	// 同一 uuid 的缓存字节已过期,显式删除防旧图复活
+	removeCoverCache(f.UUID)
+	if deferred {
+		a.emitNotify("info", "封面已入出站箱:outbox push 完成前其他设备不可见")
+	}
+	return deferred, nil
 }
 
 // ---- 小工具 ----

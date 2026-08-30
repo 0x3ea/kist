@@ -7,8 +7,10 @@
 - **本地数据**(Linux `~/.config/kist`,Windows `%AppData%\kist`):
   `config.json`(网盘档案与偏好)、`keyfile`(主密钥包装,所有库共用)、
   `index-<盘ID>.db`(明文索引,每个网盘一个)、
-  `outbox/`(出站箱:待上传的加密产物)、`backups/`(恢复归档)、`kist.log`(运行日志)
-- **网盘上的形态**:根目录 `/kist/` 下只有随机名加密 blob、`keyfile`、`index.enc`,无任何明文信息
+  `outbox/`(出站箱:待上传的加密产物)、`covers/`(封面缓存,GUI 自动管理)、
+  `backups/`(恢复归档)、`kist.log`(运行日志)
+- **网盘上的形态**:根目录 `/kist/` 下只有随机名加密 blob、`keyfile`、`index.enc`,
+  另有 `/kist/covers/` 封面子目录(同样是随机名加密对象,TODO-10),无任何明文信息
 - **⚠️ 口令是唯一凭证**:忘记口令 = 数据不可恢复,没有任何后门。请牢记并保密
 
 ## 安装
@@ -88,7 +90,7 @@ kistctl put 报告.pdf --dest /工作
 kistctl put 大视频.mp4 --dest /视频 --defer   # 弱网大文件:只加密+记账不立即上传(见下节)
 kistctl ls /2026                          # 列目录(目录行附子树摘要,见下下节)
 kistctl search 照片                        # 搜文件名、备注、目录名与目录 tag
-kistctl info 5                            # 查明细:加密/上传时间、SHA、备注、缩略图
+kistctl info 5                            # 查明细:加密/上传时间、SHA、备注、封面
 kistctl note 5 --set "海边旅行"            # 写备注(可被搜索)
 kistctl get 5 --to ~/Downloads            # 下载自动解密(校验不过不会落盘)
 kistctl rm 5 && kistctl gc                # 删除 → 清理远端 blob
@@ -155,7 +157,9 @@ kistctl rename /书/小说X 小说X-已完结    # 目录重命名(同名幂等;
   rename 同款零流量(文件**重**命名暂无入口,目录移动亦无——按需再立项);
   GUI 工具栏「新建文件夹」「重命名」同款(当前目录下)
 - 文件封面:epub/视频等无自动缩略图的内容,在 GUI 元数据面板「导入封面」
-  选本地图片(与上传缩略图同规格),随索引备份同步;pack 的自动首页封面
+  选本地图片(与上传缩略图同规格);TODO-10 起封面字节存独立加密对象
+  (远端 /kist/covers/,本地 GUI 有磁盘缓存),索引只存轻引用,随索引备份同步;
+  断网导入自动入出站箱,push 后对其他设备可见;pack 的自动首页封面
   被覆盖后清除不恢复(确认框会提示)
 
 ## 弱网 / 大文件:出站箱(put --defer)
@@ -239,15 +243,34 @@ pull 会自动拉取 keyfile 并恢复整个索引(含备注与缩略图)。
 ## 出问题时
 
 - 运行日志在 `KIST_HOME/kist.log`:传输起止、WebDAV 重试、孤儿产生、备份与 pull 决策都有记录
-- `kistctl gc --dry-run`:查看 trash 与孤儿 blob,确认后再实删
+- `kistctl gc --dry-run`:查看 trash 与孤儿 blob(文件孤儿与封面孤儿分账),确认后再实删
 - 被替换/覆盖的旧索引都在本地 `backups/` 目录,可手动恢复
 - 口令错了会明确报"口令错误",不会误伤数据
+
+## 封面出库迁移(TODO-10)
+
+早期版本把封面字节存在索引库里(库体积随图片数膨胀、每次备份都背全部封面)。
+当前版本已改为「一封面一 blob」:封面存远端 `/kist/covers/`,索引只存轻引用。
+**旧库升级后跑一次迁移**即可把存量缩略图出库并回收库空间:
+
+```bash
+kistctl covers migrate --dry-run             # 先看规模:多少行、多大体积、预计时长
+kistctl covers migrate --pass-stdin          # 实跑:逐行加密上传,断点续跑
+kistctl covers migrate --max 500 --pass-stdin # 受网盘限速时分批跑(~100 请求/分钟)
+kistctl backup --pass-stdin                  # 迁移后备份一次,把封面引用同步到远端
+```
+
+- 迁移行按用户内容保守保护(记为 custom):gc 永不自动删除孤儿封面
+- 结束会 VACUUM 回收库空间;GUI 若同开一库请先退出再跑
+- 新上传的图片自动走新管线,无需任何操作
 
 ## 当前边界
 
 - GUI 已覆盖日常使用(浏览/搜索/上传/下载/元数据/移动/备份/恢复);出站箱与迁移仍是 CLI 专属
 - GUI 的自动备份仅 GUI 会话内生效;纯 CLI 使用仍需手动 `backup`
-- 视频/epub 无自动缩略图(GUI 元数据面板可手动导入封面);密文大小已量化到档位(默认开):≤1MiB 文件 4KiB 粒度、大文件 10% 阶梯,
+- 视频/epub 无自动缩略图(GUI 元数据面板可手动导入封面);封面已出库为独立对象:
+  每张图片上传的请求数 +1(受网盘限速影响,批量导入耗时近似翻倍),
+  GUI 取未缓存封面需联网(已缓存或 legacy 行零网络);密文大小已量化到档位(默认开):≤1MiB 文件 4KiB 粒度、大文件 10% 阶梯,
   网盘只能推断大致量级;流量敏感可在 config.json 设 `"size_padding": "off"`(新上传退回精确大小)
 - 无断点续传(当前网盘 WebDAV 不支持 Range):大文件建议 `put --defer` 走出站箱;
   直接 put 失败会整体重传,且重试不免重新加密

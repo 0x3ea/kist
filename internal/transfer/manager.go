@@ -76,6 +76,7 @@ type job struct {
 	sizeHint    int64 // pack:源文件总字节(进度预估;准确值以加密结果为准)
 	// 下载/push
 	file    index.FileRow
+	cover   *index.CoverRow // push 任务的封面账(TODO-10):非 nil 时按封面账处理
 	destDir string
 	keepZip bool // pack 下载不解压,落 <名>.zip(TODO-15)
 }
@@ -294,27 +295,31 @@ func (m *Manager) packFolder(ctx context.Context, p string, destFolderID int64, 
 	}
 	base := filepath.Base(p)
 	folderIDs := map[string]int64{}
-	err = m.deps.DB.WithTx(func(tx *sql.Tx) error {
-		if !plan.RootIsPack {
-			// 根名构成第一级目录(整根成 pack 时不需要)
-			id, err := m.deps.DB.EnsureFolderPath(tx, destFolderID, []string{base})
-			if err != nil {
-				return err
+	// 整根成 pack 且无虚拟目录时没有任何目录要建,不开事务——空 WithTx
+	// 也会 +1 revision,凭空逼出一次备份(TODO-10 验收"revision 不虚高")
+	if !plan.RootIsPack || len(plan.VirtualDirs) > 0 {
+		err = m.deps.DB.WithTx(func(tx *sql.Tx) error {
+			if !plan.RootIsPack {
+				// 根名构成第一级目录(整根成 pack 时不需要)
+				id, err := m.deps.DB.EnsureFolderPath(tx, destFolderID, []string{base})
+				if err != nil {
+					return err
+				}
+				folderIDs[base] = id
 			}
-			folderIDs[base] = id
-		}
-		for _, segs := range plan.VirtualDirs {
-			full := append([]string{base}, segs...)
-			id, err := m.deps.DB.EnsureFolderPath(tx, destFolderID, full)
-			if err != nil {
-				return err
+			for _, segs := range plan.VirtualDirs {
+				full := append([]string{base}, segs...)
+				id, err := m.deps.DB.EnsureFolderPath(tx, destFolderID, full)
+				if err != nil {
+					return err
+				}
+				folderIDs[joinSegments(full)] = id
 			}
-			folderIDs[joinSegments(full)] = id
+			return nil
+		})
+		if err != nil {
+			return 0, err
 		}
-		return nil
-	})
-	if err != nil {
-		return 0, err
 	}
 	folderOf := func(parent []string) int64 {
 		if len(parent) == 0 {

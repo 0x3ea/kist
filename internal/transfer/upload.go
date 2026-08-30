@@ -149,6 +149,20 @@ func (m *Manager) runUpload(j *job) error {
 		}
 	}
 
+	// ---- 阶段二点五:封面出库(TODO-10)——缩略图就地加密成独立小 blob。
+	// 与文件同等待遇:随机名、先传字节后写引用、先于索引事务完成。
+	// 加密失败只降级(本次无封面),绝不阻断文件上传——自动封面是尽力而为的
+	// 派生缓存,与缩略图生成失败同一哲学。
+	var cover *coverOut
+	if thumb != nil {
+		if c, cerr := m.encryptCoverArtifact(mk, *thumb, tmpDir); cerr == nil {
+			cover = c
+			m.setTotal(tr, int64(meta.OrigSize)+cipherSize+cover.size)
+		} else {
+			slog.Warn("封面加密失败,本次不带封面", "path", thumbSrc, "err", cerr)
+		}
+	}
+
 	blobName := newHexID() // 两条路径共用:直接 PUT,或落出站箱待运(TODO-13)
 
 	// 索引行:pack 的 size 记量化后明文区总长(显示值;真实 origSize 在
@@ -171,7 +185,7 @@ func (m *Manager) runUpload(j *job) error {
 	}
 
 	if j.deferred {
-		return m.deferUpload(j, row, thumb, blobPath)
+		return m.deferUpload(j, row, blobPath, cover)
 	}
 
 	// ---- 阶段三:整文件 PUT(随机名,失败重试在 dav 层)----
@@ -188,9 +202,28 @@ func (m *Manager) runUpload(j *job) error {
 		return err
 	}
 
-	// ---- 阶段四:写索引(同一事务:文件+缩略图+blob 登记+revision)。
+	// 封面 PUT(小对象,紧跟文件)。derived 封面尽力而为:失败降级为
+	// "本次无封面",绝不因此判整个上传失败——文件本体才是用户所求。
+	if cover != nil {
+		cf, err := os.Open(cover.path)
+		if err != nil {
+			return err
+		}
+		err = m.remoteSnapshot().PutCoverBlob(ctx, cover.name, cf, func(sent int64) {
+			m.setProgress(tr, int64(meta.OrigSize)+cipherSize+sent)
+		})
+		cf.Close()
+		if err != nil {
+			slog.Warn("封面上传失败,本次不带封面", "name", j.desiredName, "err", err)
+			cover = nil
+		}
+	}
+
+	// ---- 阶段四:写索引(同一事务:文件+封面引用+blob 登记+revision)。
 	// 同名冲突在事务内消解——blob 名与文件名无关,并发上传也不会撞名;
 	// 若此步失败而 PUT 已成功,blob 留在远端由孤儿清理处置。
+	// 自动封面引用与文件同一事务:一次 revision,不再额外顶高版本(TODO-10
+	// 拆掉"批量导入逼出巨型备份"的放大器)。
 	finalName := ""
 	var fileID int64
 	err = m.deps.DB.WithTx(func(tx *sql.Tx) error {
@@ -205,17 +238,30 @@ func (m *Manager) runUpload(j *job) error {
 		if err != nil {
 			return err
 		}
-		if thumb != nil {
-			if err := m.deps.DB.PutThumbnail(tx, fileID, thumb.Data, thumb.W, thumb.H, thumb.Mime); err != nil {
+		if err := m.deps.DB.RegisterBlob(tx, blobName, "file", cipherSize); err != nil {
+			return err
+		}
+		if cover != nil {
+			if _, err := m.deps.DB.PutCover(tx, index.CoverRow{
+				FileID: fileID, BlobName: cover.name, Size: cover.size,
+				Width: cover.td.W, Height: cover.td.H, Mime: cover.td.Mime,
+				Source: index.CoverDerived, State: index.CoverReady,
+				CreatedAt: time.Now().Unix(),
+			}); err != nil {
 				return err
 			}
+			return m.deps.DB.RegisterBlob(tx, cover.name, "cover", cover.size)
 		}
-		return m.deps.DB.RegisterBlob(tx, blobName, "file", cipherSize)
+		return nil
 	})
 	if err != nil {
 		// PUT 已成功而索引写入失败:远端留下无主 blob 待 gc 处置,必须留痕
-		// (TODO-07 静默黑洞)
-		slog.Warn("索引写入失败,远端 blob 已成孤儿", "blob", blobName, "name", j.desiredName, "err", err)
+		// (TODO-07 静默黑洞);封面 blob 与文件 blob 同命运
+		if cover != nil {
+			slog.Warn("索引写入失败,远端 blob 已成孤儿", "blob", blobName, "cover", cover.name, "name", j.desiredName, "err", err)
+		} else {
+			slog.Warn("索引写入失败,远端 blob 已成孤儿", "blob", blobName, "name", j.desiredName, "err", err)
+		}
 		return err
 	}
 	m.mu.Lock()
@@ -228,10 +274,12 @@ func (m *Manager) runUpload(j *job) error {
 
 // deferUpload 是 runUpload 的 defer 分支(TODO-13):只"加密 + 记账 + 产物入
 // 出站箱",不发 PUT。索引即写 files.state='uploading' 与 blobs.state=
-// 'pending';产物挪入 KIST_HOME/outbox——运输交给 push 或手工搬运,
-// verify 收账。产物挪动失败时索引行已提交:留着 uploading 行,由 outbox
-// list/verify 报告"产物缺失",用户可 discard 后重来,不会出现幽灵 ready。
-func (m *Manager) deferUpload(j *job, row index.FileRow, thumb *ThumbData, blobPath string) error {
+// 'pending';封面引用同账(TODO-10:covers.state='uploading' 不可见,封面
+// 产物随文件一起入箱,push/verify 收账时一并翻转)。
+// 产物挪入 KIST_HOME/outbox——运输交给 push 或手工搬运,verify 收账。
+// 产物挪动失败时索引行已提交:留着挂账行,由 outbox list/verify 报告
+// "产物缺失",用户可 discard 后重来,不会出现幽灵 ready。
+func (m *Manager) deferUpload(j *job, row index.FileRow, blobPath string, cover *coverOut) error {
 	tr := j.tr
 	finalName := ""
 	var fileID int64
@@ -247,18 +295,32 @@ func (m *Manager) deferUpload(j *job, row index.FileRow, thumb *ThumbData, blobP
 		if err != nil {
 			return err
 		}
-		if thumb != nil {
-			if err := m.deps.DB.PutThumbnail(tx, fileID, thumb.Data, thumb.W, thumb.H, thumb.Mime); err != nil {
+		if err := m.deps.DB.RegisterBlobPending(tx, row.BlobName, "file", row.CipherSize); err != nil {
+			return err
+		}
+		if cover != nil {
+			if _, err := m.deps.DB.PutCover(tx, index.CoverRow{
+				FileID: fileID, BlobName: cover.name, Size: cover.size,
+				Width: cover.td.W, Height: cover.td.H, Mime: cover.td.Mime,
+				Source: index.CoverDerived, State: index.CoverUploading,
+				CreatedAt: time.Now().Unix(),
+			}); err != nil {
 				return err
 			}
+			return m.deps.DB.RegisterBlobPending(tx, cover.name, "cover", cover.size)
 		}
-		return m.deps.DB.RegisterBlobPending(tx, row.BlobName, "file", row.CipherSize)
+		return nil
 	})
 	if err != nil {
 		return err
 	}
 	if err := moveArtifact(blobPath, config.OutboxDir(), row.BlobName); err != nil {
 		return err
+	}
+	if cover != nil {
+		if err := moveArtifact(cover.path, config.OutboxDir(), cover.name); err != nil {
+			return err
+		}
 	}
 	m.mu.Lock()
 	tr.UUID = row.UUID

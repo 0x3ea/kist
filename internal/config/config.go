@@ -34,6 +34,11 @@ func BackupDir() string   { return filepath.Join(HomeDir(), "backups") }
 // OutboxDir 出站箱(TODO-13):put --defer 留下的加密产物,待 push/手工搬运。
 func OutboxDir() string { return filepath.Join(HomeDir(), "outbox") }
 
+// CoversCacheDir 封面明文磁盘缓存(TODO-10 GUI LRU):条目为解密后的封面
+// 图片,键 = 文件 uuid(多盘共库不撞)。与索引库同为本地明文数据,目录
+// 0700(HomeDir 已保证);预算与淘汰见 Settings.CoverCacheMB。
+func CoversCacheDir() string { return filepath.Join(HomeDir(), "covers") }
+
 // LegacyIndexPath 旧单库索引文件(schema v1 的 index.db)。
 // 仅迁移与残留判断用;正常布局下活动库在 DriveIndexPath。
 func LegacyIndexPath() string { return filepath.Join(HomeDir(), "index.db") }
@@ -53,6 +58,7 @@ type Settings struct {
 	AutoBackup     bool   `json:"auto_backup"`      // 索引变更后自动云备份(GUI 阶段生效)
 	OutboxPushFail string `json:"outbox_push_fail"` // push 失败政策:keep(默认,挂账)|discard(删行+产物)
 	SizePadding    string `json:"size_padding"`     // 大小量化填充:on(默认,v2 档位)|off(v1,流量敏感网盘可选)
+	CoverCacheMB   int    `json:"cover_cache_mb"`   // 封面磁盘缓存预算(MiB),0 = 默认 512;夹取 [64,4096](TODO-10)
 }
 
 // Drive 是单个网盘档案 = 一个独立库(自己的 blobs + 自己的 index.enc +
@@ -132,6 +138,15 @@ func (c *StoredConfig) normalize() {
 	}
 	if c.Settings.SizePadding != "off" {
 		c.Settings.SizePadding = "on" // 默认量化(TODO-08),仅显式 off 才关闭
+	}
+	// 封面缓存预算(TODO-10):0 取默认,越界夹取到边界
+	switch {
+	case c.Settings.CoverCacheMB == 0:
+		c.Settings.CoverCacheMB = 512
+	case c.Settings.CoverCacheMB < 64:
+		c.Settings.CoverCacheMB = 64
+	case c.Settings.CoverCacheMB > 4096:
+		c.Settings.CoverCacheMB = 4096
 	}
 	// 盘档案:ID 兜底(手工编辑丢 ID 的容错)、RootPath 默认、名称兜底。
 	// 注意密码不在这里清(只读路径不毁数据),落盘清理由 Save 负责。

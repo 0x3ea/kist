@@ -83,12 +83,14 @@ func seedFile(t *testing.T, db *index.DB, folderID int64, name string, pack bool
 	return id
 }
 
+// seedThumb 种一行 legacy 缩略图(TODO-10 出库后 legacy 表只读,测试
+// 直插 raw SQL 是唯一写入方——GetCover 的 legacy 回退测试载体)。
 func seedThumb(t *testing.T, db *index.DB, fileID int64) {
 	t.Helper()
-	if err := db.WithTx(func(tx *sql.Tx) error {
-		return db.PutThumbnail(tx, fileID, []byte{1}, 8, 8, "image/jpeg")
-	}); err != nil {
-		t.Fatalf("PutThumbnail(%d): %v", fileID, err)
+	if _, err := db.Exec(
+		`INSERT OR REPLACE INTO thumbnails (file_id, data, width, height, mime) VALUES (?,?,?,?,?)`,
+		fileID, []byte{1}, 8, 8, "image/jpeg"); err != nil {
+		t.Fatalf("seed thumbnails(%d): %v", fileID, err)
 	}
 }
 
@@ -341,22 +343,23 @@ func TestFolderMetaBinding(t *testing.T) {
 	}
 }
 
-// TestGetThumbnailAndFileInfo 缩略图缺失 → NOT_FOUND 码;详情投影含路径与指针时间。
-func TestGetThumbnailAndFileInfo(t *testing.T) {
+// TestGetCoverLegacyAndFileInfo 封面缺失 → NOT_FOUND 码;legacy 回退直读
+// (零网络,newTestApp 未配网络即可测);详情投影含路径与指针时间。
+func TestGetCoverLegacyAndFileInfo(t *testing.T) {
 	a := newTestApp(t)
 	idA := seedFolder(t, a.db, "合集A")
 	f := seedFile(t, a.db, idA, "封面图.png", false, 10)
 
-	// 无缩略图:错误串带 [NOT_FOUND] 前缀
-	_, err := a.GetThumbnail(f)
+	// 无封面:错误串带 [NOT_FOUND] 前缀
+	_, err := a.GetCover(f)
 	if err == nil || !strings.HasPrefix(err.Error(), "[NOT_FOUND]") {
-		t.Fatalf("缺失缩略图应 NOT_FOUND:%v", err)
+		t.Fatalf("缺失封面应 NOT_FOUND:%v", err)
 	}
 
 	seedThumb(t, a.db, f)
-	td, err := a.GetThumbnail(f)
+	td, err := a.GetCover(f)
 	if err != nil || len(td.Data) != 1 || td.Mime != "image/jpeg" {
-		t.Fatalf("缩略图读取不符:%+v %v", td, err)
+		t.Fatalf("legacy 封面回退读取不符:%+v %v", td, err)
 	}
 
 	d, err := a.FileInfo(f)
@@ -427,39 +430,9 @@ func TestFileMetaAndCoverBinding(t *testing.T) {
 		t.Fatalf("搜索结果应回填 tags:%+v", v.Files[0])
 	}
 
-	// 封面导入:真实 JPEG → thumbnails 落库,GetThumbnail 可读
-	cover := makeCoverJPEG(t, t.TempDir())
-	if err := a.SetFileCover(f, cover); err != nil {
-		t.Fatal(err)
-	}
-	td, err := a.GetThumbnail(f)
-	if err != nil || td.Mime != "image/jpeg" || len(td.Data) == 0 {
-		t.Fatalf("导入后的封面应可读:%+v %v", td, err)
-	}
-
-	// 非图片:显式用户动作,错误上抛(带 BAD_CONFIG 前缀)而非静默
-	notImg := filepath.Join(t.TempDir(), "x.txt")
-	if err := os.WriteFile(notImg, []byte("不是图片"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	if err := a.SetFileCover(f, notImg); err == nil || !strings.HasPrefix(err.Error(), "[BAD_CONFIG]") {
-		t.Fatalf("非图片应 BAD_CONFIG 报错:%v", err)
-	}
-
-	// 清除封面:空路径 → NOT_FOUND;pack 覆盖确认属前端职责,绑定只管语义
-	if err := a.SetFileCover(f, ""); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := a.GetThumbnail(f); err == nil || !strings.HasPrefix(err.Error(), "[NOT_FOUND]") {
-		t.Fatalf("清除后应 NOT_FOUND:%v", err)
-	}
-
-	// 已删除文件:导入与 meta 写都拒绝
+	// 已删除文件:meta 写拒绝(封面的导入/清除走网络化夹具,见 app_cover_test.go)
 	if err := a.DeleteEntries([]int64{f}, nil); err != nil {
 		t.Fatal(err)
-	}
-	if err := a.SetFileCover(f, cover); err == nil || !strings.HasPrefix(err.Error(), "[NOT_FOUND]") {
-		t.Fatalf("已删除文件的封面操作应 NOT_FOUND:%v", err)
 	}
 	if err := a.UpdateFileMeta(f, index.FileMetaUpdate{Tags: []string{"x"}}); err == nil {
 		t.Fatal("已删除文件的 meta 写应报错")

@@ -38,12 +38,29 @@ func row(name string, folderID int64, pack bool, state string, size, modified in
 	}
 }
 
+// mustThumb 种一行 legacy 缩略图(TODO-10 出库后 PutThumbnail 已删,legacy
+// 表只读,测试直插 raw SQL 是唯一合法写入方——迁移回退语义的测试载体)。
 func mustThumb(t *testing.T, db *DB, fileID int64) {
 	t.Helper()
+	if _, err := db.Exec(
+		`INSERT OR REPLACE INTO thumbnails (file_id, data, width, height, mime) VALUES (?,?,?,?,?)`,
+		fileID, []byte{1}, 8, 8, "image/jpeg"); err != nil {
+		t.Fatalf("seed thumbnails(%d): %v", fileID, err)
+	}
+}
+
+// mustCover 种一行 ready 封面引用(TODO-10 出库后的封面常规形态)。
+func mustCover(t *testing.T, db *DB, fileID int64) {
+	t.Helper()
 	if err := db.WithTx(func(tx *sql.Tx) error {
-		return db.PutThumbnail(tx, fileID, []byte{1}, 8, 8, "image/jpeg")
+		_, err := db.PutCover(tx, CoverRow{
+			FileID: fileID, BlobName: fmt.Sprintf("cover-%d", fileID), Size: 128,
+			Width: 8, Height: 8, Mime: "image/jpeg", Source: CoverCustom,
+			State: CoverReady, CreatedAt: now(),
+		})
+		return err
 	}); err != nil {
-		t.Fatalf("PutThumbnail(%d): %v", fileID, err)
+		t.Fatalf("PutCover(%d): %v", fileID, err)
 	}
 }
 

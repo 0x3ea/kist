@@ -222,8 +222,8 @@ func TestFileMetaSurvivesSnapshot(t *testing.T) {
 	if err := db.UpdateFileMeta(fileID, FileMetaUpdate{Note: &note, Tags: []string{"科幻"}}); err != nil {
 		t.Fatal(err)
 	}
-	// 手动封面:直写 thumbnails 行(GUI SetFileCover 的索引侧效果)
-	mustThumb(t, db, fileID)
+	// 手动封面:直写 covers 引用行(GUI SetFileCover 的索引侧效果)
+	mustCover(t, db, fileID)
 
 	snap := fmt.Sprintf("%s-snap.db", db.Path)
 	if err := db.SnapshotTo(snap); err != nil {
@@ -236,8 +236,8 @@ func TestFileMetaSurvivesSnapshot(t *testing.T) {
 	if err != nil || m.Note != note || !slices.Equal(m.Tags, []string{"科幻"}) {
 		t.Fatalf("快照替换后文件元数据丢失: %+v %v", m, err)
 	}
-	data, mime, err := db.GetThumbnail(fileID)
-	if err != nil || mime != "image/jpeg" || len(data) != 1 {
-		t.Fatalf("快照替换后手动封面丢失: %d 字节 %s %v", len(data), mime, err)
+	c, err := db.GetReadyCover(fileID)
+	if err != nil || c.Mime != "image/jpeg" || c.BlobName == "" {
+		t.Fatalf("快照替换后手动封面丢失: %+v %v", c, err)
 	}
 }

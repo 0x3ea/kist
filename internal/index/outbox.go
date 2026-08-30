@@ -34,8 +34,11 @@ func (db *DB) ListUploading() ([]FileRow, error) {
 	return out, rows.Err()
 }
 
-// MarkUploaded 收账:files 转 ready 并补 uploaded_at,blobs pending 转 active。
-// 经 WithTx(计入 revision,多设备同步能感知);幂等——对已 ready 的行无操作。
+// MarkUploaded 收账:files 转 ready 并补 uploaded_at,封面引用翻转
+// uploading→ready(TODO-10),blobs pending 转 active。经 WithTx(计入
+// revision,多设备同步能感知);幂等——对已 ready 的行无操作。
+// 一个 blob 名只会命中 files 或 covers 之一(blobs.name 全局唯一),
+// 三个 UPDATE 天然各管各的,无需按 kind 分叉。
 func (db *DB) MarkUploaded(blobName string, at int64) error {
 	return db.WithTx(func(tx *sql.Tx) error {
 		if _, err := tx.Exec(
@@ -43,28 +46,83 @@ func (db *DB) MarkUploaded(blobName string, at int64) error {
 			at, blobName); err != nil {
 			return err
 		}
+		if _, err := tx.Exec(
+			`UPDATE covers SET state = ? WHERE blob_name = ? AND state = ?`,
+			CoverReady, blobName, CoverUploading); err != nil {
+			return err
+		}
 		_, err := tx.Exec(`UPDATE blobs SET state = 'active' WHERE name = ? AND state = 'pending'`, blobName)
 		return err
 	})
 }
 
-// DiscardPending 回滚一笔待上传记账:硬删 files 行(thumbnails 随外键级联)
-// 与 blobs 行。仅允许放弃 uploading 状态——已就绪文件必须走 rm 软删流程,
-// 绝不能经此路径无声消失。
-func (db *DB) DiscardPending(blobName string) error {
-	return db.WithTx(func(tx *sql.Tx) error {
-		res, err := tx.Exec(`DELETE FROM files WHERE blob_name = ? AND state = 'uploading'`, blobName)
-		if err != nil {
-			return err
+// DiscardPending 回滚一笔待上传记账:"一笔"= 文件及其封面(TODO-10)。
+// 硬删 files 行(封面引用随外键级联)与对应 blobs 行;返回被一并放弃的
+// 封面 blob 名(调用方据此清出站箱产物)。仅允许放弃 uploading 状态——
+// 已就绪文件必须走 rm 软删流程,绝不能经此路径无声消失。
+// 单独放弃一笔封面挂账(GUI 导入回退、文件已 ready)也走这里:按 blob 名
+// 删 covers 行,文件行不受影响。
+func (db *DB) DiscardPending(blobName string) (coverBlobs []string, err error) {
+	err = db.WithTx(func(tx *sql.Tx) error {
+		f, ferr := scanFile(tx.QueryRow(
+			`SELECT `+fileColumns+` FROM files WHERE blob_name = ?`, blobName))
+		isFile := ferr == nil
+		if ferr != nil && ferr != sql.ErrNoRows {
+			return ferr
 		}
-		n, err := res.RowsAffected()
-		if err != nil {
-			return err
-		}
-		if n == 0 {
+		if isFile && f.State != "uploading" {
 			return fmt.Errorf("index: %q 不是待上传对象,拒绝放弃(已就绪文件请用 rm)", blobName)
 		}
-		_, err = tx.Exec(`DELETE FROM blobs WHERE name = ?`, blobName)
+
+		if isFile {
+			// 文件账:收齐该文件的封面 blob 名后一并放弃(引用行随下面的
+			// files 行删除级联消失,blobs 行要显式删)
+			rows, err := tx.Query(`SELECT blob_name FROM covers WHERE file_id = ?`, f.ID)
+			if err != nil {
+				return err
+			}
+			for rows.Next() {
+				var name string
+				if err := rows.Scan(&name); err != nil {
+					rows.Close()
+					return err
+				}
+				coverBlobs = append(coverBlobs, name)
+			}
+			if err := rows.Err(); err != nil {
+				rows.Close()
+				return err
+			}
+			rows.Close()
+			res, err := tx.Exec(`DELETE FROM files WHERE id = ? AND state = 'uploading'`, f.ID)
+			if err != nil {
+				return err
+			}
+			if n, err := res.RowsAffected(); err != nil {
+				return err
+			} else if n == 0 {
+				return fmt.Errorf("index: %q 不是待上传对象,拒绝放弃(已就绪文件请用 rm)", blobName)
+			}
+			for _, name := range coverBlobs {
+				if _, err := tx.Exec(`DELETE FROM blobs WHERE name = ?`, name); err != nil {
+					return err
+				}
+			}
+		} else {
+			// 单独的封面账:按 blob 名删引用行,文件行不动
+			res, err := tx.Exec(
+				`DELETE FROM covers WHERE blob_name = ? AND state = ?`, blobName, CoverUploading)
+			if err != nil {
+				return err
+			}
+			if n, err := res.RowsAffected(); err != nil {
+				return err
+			} else if n == 0 {
+				return fmt.Errorf("index: %q 不是待上传对象,拒绝放弃(已就绪文件请用 rm)", blobName)
+			}
+		}
+		_, err := tx.Exec(`DELETE FROM blobs WHERE name = ?`, blobName)
 		return err
 	})
+	return coverBlobs, err
 }

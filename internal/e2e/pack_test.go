@@ -84,8 +84,8 @@ func TestE2EFolderPack(t *testing.T) {
 	if err != nil || !f.Pack || !f.UserMeta.Valid {
 		t.Fatalf("pack 行字段: %+v %v", f, err)
 	}
-	if td, _, err := e.db.GetThumbnail(packID); err != nil || len(td) == 0 {
-		t.Fatalf("pack 应有首页封面缩略图: %d %v", len(td), err)
+	if cov, err := e.db.GetReadyCover(packID); err != nil || cov.Size <= 0 {
+		t.Fatalf("pack 应有首页封面引用: %+v %v", cov, err)
 	}
 
 	// get 还原成目录:逐文件 SHA 一致

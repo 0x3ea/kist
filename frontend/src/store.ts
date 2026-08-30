@@ -317,19 +317,48 @@ export function summaryText(folderID: number): string {
   return parts.join(' · ')
 }
 
-/** 缩略图 dataURL(带缓存);取不到返回空串(调用方显示占位) */
+/** 封面 dataURL(带缓存 + 有界并发队列);取不到返回空串(调用方显示占位)。
+ * TODO-10 出库后封面可能走网络(磁盘缓存未命中 → 远端 covers 命名空间),
+ * 全量无上限预取会瞬间压满并发:这里限 4 路排队,负缓存防止对"无封面"反复请求。 */
+const THUMB_CONCURRENCY = 4
+let thumbInflight = 0
+const thumbWaiters: Array<() => void> = []
+
 export async function ensureThumb(fileID: number): Promise<string> {
   const hit = store.thumbs.get(fileID)
   if (hit !== undefined) return hit
+  await acquireThumb()
   try {
-    const t = await API.GetThumbnail(fileID)
+    const again = store.thumbs.get(fileID) // 排队期间可能已被并发取到
+    if (again !== undefined) return again
+    const t = await API.GetCover(fileID)
     const url = thumbToDataUrl(t)
     store.thumbs.set(fileID, url)
     return url
   } catch {
-    store.thumbs.set(fileID, '') // 负缓存:没有缩略图,不反复请求
+    store.thumbs.set(fileID, '') // 负缓存:没有封面/暂不可达,不反复请求
     return ''
+  } finally {
+    releaseThumb()
   }
+}
+
+function acquireThumb(): Promise<void> {
+  if (thumbInflight < THUMB_CONCURRENCY) {
+    thumbInflight++
+    return Promise.resolve()
+  }
+  return new Promise((res) =>
+    thumbWaiters.push(() => {
+      thumbInflight++
+      res()
+    })
+  )
+}
+
+function releaseThumb() {
+  thumbInflight--
+  thumbWaiters.shift()?.()
 }
 
 // ThumbData.Data 在 Go 是 []byte:JSON 传输为 base64 字符串,但 wails 生成的
@@ -512,22 +541,23 @@ export async function pickImageFile(): Promise<string> {
 }
 
 /**
- * 导入/清除文件封面(localPath 空 = 清除)。成功后失效缩略图缓存——
- * 旧图与"无缩略图"负缓存都不可信,强制下次重取;详情面板同步 HasThumb。
+ * 导入/清除文件封面(localPath 空 = 清除)。TODO-10:导入走网络,断网自动
+ * 回退出站箱(deferred)。成功后失效封面缓存——旧图与"无封面"负缓存都不
+ * 可信,强制下次重取;详情面板同步 HasThumb。
  */
-export async function setFileCover(fileID: number, localPath: string): Promise<boolean> {
+export async function setFileCover(fileID: number, localPath: string): Promise<'ok' | 'deferred' | null> {
   try {
-    await API.SetFileCover(fileID, localPath)
+    const deferred = await API.SetFileCover(fileID, localPath)
     store.thumbs.delete(fileID)
     if (store.detail?.ID === fileID) {
       store.detail.HasThumb = localPath !== ''
-      if (localPath) ensureThumb(fileID)
+      if (localPath && !deferred) ensureThumb(fileID)
     }
-    toast('info', localPath ? '封面已导入' : '封面已清除')
-    return true
+    toast('info', localPath ? (deferred ? '封面已入出站箱:outbox push 后对其他设备可见' : '封面已导入') : '封面已清除')
+    return deferred ? 'deferred' : 'ok'
   } catch (e) {
     fail(e)
-    return false
+    return null
   }
 }
 

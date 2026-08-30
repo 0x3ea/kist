@@ -95,6 +95,7 @@ const settings = reactive({
   chunk_mib: 4,
   auto_backup: true,
   size_padding: 'on',
+  cover_cache_mb: 512,
 })
 
 onMounted(async () => {
@@ -104,6 +105,7 @@ onMounted(async () => {
     settings.chunk_mib = store.settings.chunk_mib
     settings.auto_backup = store.settings.auto_backup
     settings.size_padding = store.settings.size_padding
+    settings.cover_cache_mb = store.settings.cover_cache_mb
   }
 })
 
@@ -114,6 +116,7 @@ async function onSaveSettings() {
   s.chunk_mib = settings.chunk_mib
   s.auto_backup = settings.auto_backup
   s.size_padding = settings.size_padding
+  s.cover_cache_mb = settings.cover_cache_mb
   await saveSettings(s)
 }
 
@@ -235,6 +238,17 @@ async function onChangePass() {
         <input :checked="settings.size_padding === 'on'" type="checkbox" @change="settings.size_padding = ($event.target as HTMLInputElement).checked ? 'on' : 'off'" />
         大小混淆(加密时补零到档位,网盘侧看不出真实大小;开销 ≤10%)
       </label>
+      <label>封面缓存预算(TODO-10:封面出库后本地磁盘缓存,超出按最旧淘汰)
+        <select v-model.number="settings.cover_cache_mb">
+          <option :value="64">64 MB</option>
+          <option :value="128">128 MB</option>
+          <option :value="256">256 MB</option>
+          <option :value="512">512 MB(默认)</option>
+          <option :value="1024">1 GB</option>
+          <option :value="2048">2 GB</option>
+          <option :value="4096">4 GB</option>
+        </select>
+      </label>
       <div class="row">
         <button @click="onSaveSettings">保存偏好</button>
       </div>
@@ -261,7 +275,8 @@ async function onChangePass() {
       <div v-if="gc" class="gc-report">
         <p>待删 trash blob:{{ gc.TrashOrDeleted?.length ?? 0 }} 个</p>
         <p>孤儿(只报告):{{ gc.Orphans?.length ?? 0 }} 个</p>
-        <pre v-if="gc.Orphans?.length">{{ gc.Orphans.slice(0, 20).join('\n') }}{{ gc.Orphans.length > 20 ? `\n… 共 ${gc.Orphans.length} 个` : '' }}</pre>
+        <p>封面孤儿(covers/,只报告):{{ gc.CoverOrphans?.length ?? 0 }} 个</p>
+        <pre v-if="gc.Orphans?.length || gc.CoverOrphans?.length">{{ [...(gc.Orphans ?? []), ...(gc.CoverOrphans ?? [])].slice(0, 20).join('\n') }}{{ (gc.Orphans.length ?? 0) + (gc.CoverOrphans.length ?? 0) > 20 ? `\n… 共 ${(gc.Orphans.length ?? 0) + (gc.CoverOrphans.length ?? 0)} 个` : '' }}</pre>
       </div>
     </section>
 

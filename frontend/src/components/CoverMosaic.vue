@@ -1,10 +1,11 @@
 <script setup lang="ts">
 // CoverMosaic.vue — 目录封面宫格(TODO-16 三级回退链的渲染端):
 // 索引层已把封面解析成 ≤4 个 fileID(自定义封面=单值满铺,派生=前 4 子条目,
-// 空=占位),这里只管渲染:1 格满铺 / 2-4 格均分,0 与取不到缩略图的格显示
-// 按目录名 hash 挑色的占位块。
+// 空=占位),这里只管渲染:1 格满铺 / 2-4 格均分,0 与取不到封面的格显示
+// 按目录名 hash 挑色的占位块。取图由 CardGrid 的可见优先预取触发
+// (TODO-10:封面可能走网络,不再组件内自发全量取)。
 import { computed } from 'vue'
-import { store, ensureThumb } from '../store'
+import { store } from '../store'
 
 const props = defineProps<{ ids: number[]; name: string }>()
 
@@ -19,10 +20,6 @@ const hue = computed(() => {
   for (const ch of props.name ?? '') h = (h * 31 + ch.charCodeAt(0)) % 360
   return h
 })
-
-if (cells.value.length) {
-  cells.value.forEach((c) => c.id && ensureThumb(c.id))
-}
 </script>
 
 <template>

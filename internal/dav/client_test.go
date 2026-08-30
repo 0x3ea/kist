@@ -338,3 +338,34 @@ func TestCtxCanceled(t *testing.T) {
 		t.Fatalf("ctx 已取消时不应发起任何请求")
 	}
 }
+
+// TestListMarksDirectories TODO-10:List/ListDir 携带 IsDir,上游据此把
+// covers/ 目录条目与普通 blob 区分开。
+func TestListMarksDirectories(t *testing.T) {
+	srv, _ := newTestServer(t)
+	c := newFastClient(t, srv)
+	ctx := context.Background()
+	if err := c.EnsureRoot(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if err := c.EnsureDir(ctx, "/kist/covers"); err != nil {
+		t.Fatal(err)
+	}
+	// 已存在目录重复 MKCOL:幂等
+	if err := c.EnsureDir(ctx, "/kist/covers"); err != nil {
+		t.Fatalf("EnsureDir 应幂等: %v", err)
+	}
+	objs, err := c.List(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var sawDir bool
+	for _, o := range objs {
+		if o.Name == "covers" {
+			sawDir = o.IsDir
+		}
+	}
+	if !sawDir {
+		t.Fatal("List 应把 covers 标记为目录条目")
+	}
+}

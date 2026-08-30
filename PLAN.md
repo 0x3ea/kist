@@ -9,9 +9,9 @@
 已确认的决策:
 - **GUI 桌面应用**(Wails v2:Go 后端 + vue-ts 前端,系统 WebView)
 - **通用 WebDAV**(按最保守兼容性:整文件 PUT、不做分块 PUT)
-- **远端扁平布局**:网盘上只有 `/kist/` 目录下的随机名加密 blob + `keyfile` + `index.enc`,目录结构/文件名只存在于本地索引(隐私优先)
+- **远端两命名空间布局**(TODO-10 起,由"永远扁平"有意破例):网盘上 `/kist/` 主命名空间放随机名加密 blob + `keyfile` + `index.enc`,`/kist/covers/` 子命名空间放封面 blob(随机名);两侧都不携带任何明文信息,目录结构/文件名只存在于本地索引(隐私优先)。破例动机:封面使对象数翻倍,分目录让主命名空间的全列成本(gc/migrate)不随封面增长,且 covers 孤儿可判定为"封面孤儿"单独处置
 - **索引云备份**:索引变更后加密备份上传,新设备凭密码拉回恢复
-- **索引含用户自定义数据**:每文件记录加密时间、备注(可编辑、可搜索)、图片自动缩略图(最长边 ≤512px、JPEG q80、上限 128KB,存于索引库随备份同步;视频缩略图需 ffmpeg,留作增强)
+- **索引含用户自定义数据**:每文件记录加密时间、备注(可编辑、可搜索)、图片自动缩略图(最长边 ≤512px、JPEG q80、上限 128KB;TODO-10 起字节出库为封面 blob,索引只存引用;视频缩略图需 ffmpeg,留作增强)
 
 本机环境:Go 1.26.6 ✓、Node 24 ✓;**wails CLI 与 GTK/WebKit 系统库未装**(按环境策略推迟到 Phase 6——CLI 全流程跑通后再配置;Ubuntu 24.04 只有 webkit2gtk-4.1,所有 wails 命令需带 `-tags webkit2_41`)。
 
@@ -141,15 +141,25 @@ CREATE TABLE files (
 CREATE INDEX ix_files_folder ON files(folder_id) WHERE deleted_at IS NULL;
 CREATE INDEX ix_files_name ON files(name);
 
-CREATE TABLE thumbnails (                                   -- 图片缩略图,存索引库,随加密备份同步
+CREATE TABLE thumbnails (                                   -- legacy 只读回退(TODO-10 出库前形态)
   file_id INTEGER PRIMARY KEY REFERENCES files(id) ON DELETE CASCADE,
   data BLOB NOT NULL, width INTEGER NOT NULL, height INTEGER NOT NULL,
-  mime TEXT NOT NULL);                                      -- ≤128KB,image/jpeg|image/png
+  mime TEXT NOT NULL);                                      -- covers migrate 清空后闲置,禁止新写入
+
+CREATE TABLE covers (                                       -- TODO-10 封面出库:轻引用,字节走 blob 管线
+  file_id INTEGER PRIMARY KEY REFERENCES files(id) ON DELETE CASCADE,
+  blob_name TEXT NOT NULL UNIQUE,                           -- 远端 /kist/covers/ 对象名(32hex)
+  size INTEGER NOT NULL,                                    -- 密文大小(读侧长度校验)
+  width INTEGER NOT NULL, height INTEGER NOT NULL,
+  mime TEXT NOT NULL,
+  source TEXT NOT NULL,                                     -- derived(自动,可再生)|custom(用户,不可再生)
+  state TEXT NOT NULL,                                      -- uploading(出站箱挂账,不可见)|ready
+  created_at INTEGER NOT NULL);
 
 CREATE TABLE blobs (
   name TEXT PRIMARY KEY, size INTEGER NOT NULL,
-  kind TEXT NOT NULL DEFAULT 'file',                        -- file|index|keyfile
-  state TEXT NOT NULL DEFAULT 'active',                     -- active|orphan|trash
+  kind TEXT NOT NULL DEFAULT 'file',                        -- file|index|keyfile|cover
+  state TEXT NOT NULL DEFAULT 'active',                     -- active|orphan|trash|pending(出站箱)
   created_at INTEGER NOT NULL);
 
 CREATE TABLE sync_state (key TEXT PRIMARY KEY, value TEXT NOT NULL);
@@ -159,7 +169,7 @@ CREATE TABLE sync_state (key TEXT PRIMARY KEY, value TEXT NOT NULL);
 - `PRAGMA journal_mode=WAL; foreign_keys=ON; busy_timeout=5000; user_version=1`(按版本迁移)。
 - **revision**:每个写事务内 +1,单调计数器,LWW 依据(不信任时钟)。
 - 软删除:查询一律 `WHERE deleted_at IS NULL`;搜索用 `name/note LIKE '%q%'`(FTS5 留作增强)。
-- 用户自定义数据:加密时间/备注/缩略图(`thumbnails` 表,最长边 512px、上限 128KB)存于索引库,随加密备份同步;`user_meta` 为 JSON 扩展位。
+- 用户自定义数据:加密时间/备注存于索引库,随加密备份同步;`user_meta` 为 JSON 扩展位。封面(TODO-10 起不持字节):索引只存 `covers` 轻引用,字节走独立 blob(一封面一 blob,随机名入 `/kist/covers/`);自动封面随上传事务写引用、不额外计 revision,用户封面计 revision(与 SetNote 同级);存量缩略图经 `kistctl covers migrate` 一次性出库。
 - `SnapshotTo(path)` = `VACUUM INTO`(一致性快照);`ReplaceWith(path)` = 关库→旧库归档→tmp+rename 原子替换→重开。
 
 ### 索引云备份(internal/backup)

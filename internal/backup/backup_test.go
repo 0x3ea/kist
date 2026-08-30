@@ -96,7 +96,12 @@ func insertFile(t *testing.T, db *index.DB, name, note string, withThumb bool) {
 			return err
 		}
 		if withThumb {
-			return db.PutThumbnail(tx, id, []byte{0xFF, 0xD8, 1, 2}, 512, 384, "image/jpeg")
+			_, err := db.PutCover(tx, index.CoverRow{
+				FileID: id, BlobName: name + "-cover", Size: 128,
+				Width: 512, Height: 384, Mime: "image/jpeg",
+				Source: index.CoverCustom, State: index.CoverReady, CreatedAt: 1,
+			})
+			return err
 		}
 		return nil
 	})
@@ -154,9 +159,9 @@ func TestBackupPullDualDevice(t *testing.T) {
 		t.Fatalf("B 搜索备注: %+v", hits)
 	}
 	img, _ := dbB.Search("照片.jpg", 5)
-	td, _, err := dbB.GetThumbnail(img[0].ID)
-	if err != nil || len(td) != 4 {
-		t.Fatalf("B 缩略图: %v %d", err, len(td))
+	cov, err := dbB.GetReadyCover(img[0].ID)
+	if err != nil || cov.Width != 512 || cov.BlobName != "照片.jpg-cover" {
+		t.Fatalf("B 封面引用: %+v %v", cov, err)
 	}
 
 	// ---- B 新增记录并备份 → A pull → replaced(双向同步)----

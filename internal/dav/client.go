@@ -30,6 +30,7 @@ type RemoteObject struct {
 	Name    string
 	Size    int64
 	ModTime time.Time
+	IsDir   bool // 集合(目录)条目:上游命名空间划分用(如 /kist/covers/,TODO-10)
 }
 
 // Client 是本包对外暴露的最小 WebDAV 语义;所有方法接受 ctx 用于取消控制。
@@ -39,6 +40,9 @@ type Client interface {
 	Ping(ctx context.Context) error
 	// EnsureRoot 创建根目录;已存在(405)视为成功,幂等。
 	EnsureRoot(ctx context.Context) error
+	// EnsureDir 创建任意远端目录(MKCOL,幂等);EnsureRoot 的通用形态
+	// (TODO-10:封面命名空间 /kist/covers/ 首次使用前创建)。
+	EnsureDir(ctx context.Context, remotePath string) error
 	// PutFile 整文件上传:显式设置 Content-Length(部分保守网盘拒绝
 	// chunked 编码的 PUT);失败整体重试,每次重试从头重传;
 	// prog 以密文累计字节回调(64KiB 粒度,可为 nil)。
@@ -55,6 +59,8 @@ type Client interface {
 	PutStream(ctx context.Context, remotePath string, size int64, body io.Reader) error
 	// List 列出根目录下的全部对象。
 	List(ctx context.Context) ([]RemoteObject, error)
+	// ListDir 列出指定远端目录下的全部对象(TODO-10:封面命名空间枚举)。
+	ListDir(ctx context.Context, remotePath string) ([]RemoteObject, error)
 	// Probe 精确路径探测:PROPFIND Depth 0 只问该资源本身,不列整目录
 	// (O(1),不随库规模增长);返回是否存在与服务器报告的字节大小
 	// (-1 = 未提供)。404 → (false, 0, nil),网络/权限等其余错误
@@ -100,8 +106,12 @@ func (c *client) Ping(ctx context.Context) error {
 }
 
 func (c *client) EnsureRoot(ctx context.Context) error {
+	return c.EnsureDir(ctx, c.cfg.RootPath)
+}
+
+func (c *client) EnsureDir(ctx context.Context, remotePath string) error {
 	return c.retry.Do(ctx, func() error {
-		err := c.gc.Mkdir(c.cfg.RootPath, 0o755)
+		err := c.gc.Mkdir(remotePath, 0o755)
 		if err != nil && gowebdav.IsErrCode(err, http.StatusMethodNotAllowed) {
 			return nil // 405 = 目录已存在,MKCOL 的预期幂等结果
 		}
@@ -257,15 +267,19 @@ func copyWithProg(dst io.Writer, src io.Reader, prog func(int64)) (int64, error)
 }
 
 func (c *client) List(ctx context.Context) ([]RemoteObject, error) {
+	return c.ListDir(ctx, c.cfg.RootPath)
+}
+
+func (c *client) ListDir(ctx context.Context, remotePath string) ([]RemoteObject, error) {
 	var out []RemoteObject
 	err := c.retry.Do(ctx, func() error {
-		fis, err := c.gc.ReadDir(c.cfg.RootPath)
+		fis, err := c.gc.ReadDir(remotePath)
 		if err != nil {
 			return err
 		}
 		out = make([]RemoteObject, 0, len(fis))
 		for _, fi := range fis {
-			out = append(out, RemoteObject{Name: fi.Name(), Size: fi.Size(), ModTime: fi.ModTime()})
+			out = append(out, RemoteObject{Name: fi.Name(), Size: fi.Size(), ModTime: fi.ModTime(), IsDir: fi.IsDir()})
 		}
 		return nil
 	})

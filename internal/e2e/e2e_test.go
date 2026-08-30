@@ -9,6 +9,7 @@ import (
 	"image"
 	"image/color"
 	"image/jpeg"
+	"io"
 	"log/slog"
 	"net/http/httptest"
 	"os"
@@ -92,6 +93,26 @@ func newEnv(t *testing.T) *env {
 		ChunkMiB:    func() int { return 1 },
 	})
 	return &env{store: store, db: db, m: m, mk: mk, srv: srv}
+}
+
+// fetchAndDecryptCover 从 covers 命名空间拉取封面 blob 并解密回原字节
+// (TODO-10:验证"字节真的在远端且可解")。
+func (e *env) fetchAndDecryptCover(t *testing.T, cov index.CoverRow) ([]byte, error) {
+	t.Helper()
+	tmp := filepath.Join(t.TempDir(), "cover-blob")
+	if err := e.store.GetCoverBlob(context.Background(), cov.BlobName, tmp, nil); err != nil {
+		return nil, err
+	}
+	f, err := os.Open(tmp)
+	if err != nil {
+		return nil, err
+	}
+	defer f.Close()
+	br, err := crypto.NewBlobReader(f, cov.Size, e.mk)
+	if err != nil {
+		return nil, err
+	}
+	return io.ReadAll(br)
 }
 
 func waitIdle(t *testing.T, m *transfer.Manager) []transfer.Transfer {
@@ -194,7 +215,8 @@ func TestE2ELifecycle(t *testing.T) {
 	}
 	allDone(t, waitIdle(t, e.m))
 
-	// 远端:4 个 blob + keyfile(ListBlobs 排除保留名)
+	// 远端:4 个 blob + keyfile(ListBlobs 排除保留名与 covers/ 命名空间;
+	// 封面 blob 在 covers/ 下,不进这个计数)
 	blobs, err := e.store.ListBlobs(ctx)
 	if err != nil || len(blobs) != 4 {
 		t.Fatalf("远端 blob 数 = %d,期望 4: %v", len(blobs), err)
@@ -220,17 +242,21 @@ func TestE2ELifecycle(t *testing.T) {
 		t.Fatalf("chunkSize = %d,期望 1MiB", f.ChunkSize)
 	}
 
-	// 缩略图:照片.jpg 应有,且是缩过的 JPEG
+	// 封面:照片.jpg 应有(TODO-10:引用在 covers 表,字节在 covers 命名空间)
 	imgHits, _ := e.db.Search("照片.jpg", 10)
 	if len(imgHits) != 1 {
 		t.Fatalf("找不到 照片.jpg: %+v", imgHits)
 	}
-	td, mime, err := e.db.GetThumbnail(imgHits[0].ID)
+	cov, err := e.db.GetReadyCover(imgHits[0].ID)
 	if err != nil {
-		t.Fatalf("缩略图缺失: %v", err)
+		t.Fatalf("封面引用缺失: %v", err)
 	}
-	if mime != "image/jpeg" || len(td) == 0 || len(td) > 128<<10 {
-		t.Fatalf("缩略图异常: mime=%s size=%d", mime, len(td))
+	if cov.Mime != "image/jpeg" || cov.Size <= 0 || cov.Size > 128<<10 {
+		t.Fatalf("封面引用异常: mime=%s size=%d", cov.Mime, cov.Size)
+	}
+	td, err := e.fetchAndDecryptCover(t, cov)
+	if err != nil {
+		t.Fatalf("封面 blob 解密失败: %v", err)
 	}
 	cfg, _, err := image.DecodeConfig(bytes.NewReader(td))
 	if err != nil {
@@ -361,18 +387,18 @@ func TestE2ERemoveAndGC(t *testing.T) {
 	}
 
 	// dry-run:列出待删与孤儿,不动远端
-	del, orph, err := transfer.RunGC(ctx, e.store, e.db, true)
-	if err != nil || len(del) != 1 || len(orph) != 1 {
-		t.Fatalf("dry-run: del=%v orph=%v err=%v", del, orph, err)
+	res, err := transfer.RunGC(ctx, e.store, e.db, true)
+	if err != nil || len(res.Deleted) != 1 || len(res.Orphans) != 1 {
+		t.Fatalf("dry-run: del=%v orph=%v err=%v", res.Deleted, res.Orphans, err)
 	}
 	if after, _ := e.store.ListBlobs(ctx); len(after) != 2 {
 		t.Fatalf("dry-run 不应动远端: %v", after)
 	}
 
 	// 实删:trash 消失,孤儿保留
-	del, orph, err = transfer.RunGC(ctx, e.store, e.db, false)
-	if err != nil || len(del) != 1 || len(orph) != 1 {
-		t.Fatalf("gc: del=%v orph=%v err=%v", del, orph, err)
+	res, err = transfer.RunGC(ctx, e.store, e.db, false)
+	if err != nil || len(res.Deleted) != 1 || len(res.Orphans) != 1 {
+		t.Fatalf("gc: del=%v orph=%v err=%v", res.Deleted, res.Orphans, err)
 	}
 	after, _ := e.store.ListBlobs(ctx)
 	if len(after) != 1 || after[0] != "aaaa0000bbbb1111cccc2222dddd3333" {

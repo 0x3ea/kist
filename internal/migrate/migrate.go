@@ -7,6 +7,7 @@ import (
 	"io"
 	"log/slog"
 	"sort"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -61,8 +62,22 @@ func Run(ctx context.Context, o Options) (Result, error) {
 	sizes := make(map[string]int64, len(objs))
 	names := make([]string, 0, len(objs))
 	for _, ob := range objs {
+		if ob.IsDir {
+			continue // covers/ 命名空间条目,由下方单独枚举(TODO-10)
+		}
 		names = append(names, ob.Name)
 		sizes[ob.Name] = ob.Size
+	}
+	// 封面命名空间(TODO-10):对象以 covers/ 前缀并入清单,一并搬运——
+	// 漏掉它们,换网盘后所有封面(custom 也是用户内容)全部丢失
+	coverObjs, err := o.Src.ListCoverBlobs(ctx)
+	if err != nil {
+		return res, fmt.Errorf("migrate: 枚举源端封面对象失败: %w", err)
+	}
+	for _, ob := range coverObjs {
+		rel := remote.CoversDir + "/" + ob.Name
+		names = append(names, rel)
+		sizes[rel] = ob.Size
 	}
 	sort.Strings(names)
 	if _, ok := sizes[remote.KeyFileName]; !ok {
@@ -74,6 +89,11 @@ func Run(ctx context.Context, o Options) (Result, error) {
 	}
 	if err := o.Dst.EnsureRoot(ctx); err != nil {
 		return res, fmt.Errorf("migrate: 初始化目标根目录失败: %w", err)
+	}
+	if len(coverObjs) > 0 {
+		if err := o.Dst.EnsureDir(ctx, o.DstRoot+"/"+remote.CoversDir); err != nil {
+			return res, fmt.Errorf("migrate: 初始化目标封面目录失败: %w", err)
+		}
 	}
 
 	start := time.Now()
@@ -140,9 +160,10 @@ func Run(ctx context.Context, o Options) (Result, error) {
 	return res, nil
 }
 
-// copyOne 搬运单个对象;返回是否因"目标已存在且大小相同"而跳过。
-// 重试在整对象粒度:每次尝试重开 GET、重发 PUT(流不可回卷);
-// 目标上的半截残留(大小不符)不会被跳过,下一轮覆盖重传。
+// copyOne 搬运单个对象;name 是相对名(封面带 covers/ 前缀,TODO-10)。
+// 返回是否因"目标已存在且大小相同"而跳过。重试在整对象粒度:每次尝试
+// 重开 GET、重发 PUT(流不可回卷);目标上的半截残留(大小不符)不会被
+// 跳过,下一轮覆盖重传。
 func copyOne(ctx context.Context, o Options, retry *dav.Retrier, name string, size int64) (bool, error) {
 	abs := o.DstRoot + "/" + name
 	found, dsize, err := o.Dst.Probe(ctx, abs)
@@ -153,7 +174,7 @@ func copyOne(ctx context.Context, o Options, retry *dav.Retrier, name string, si
 		return true, nil // 上次已搬完:断点跳过(dsize<0 = 服务器未报大小,保守不跳)
 	}
 	err = retry.Do(ctx, func() error {
-		body, err := o.Src.GetBlobBody(ctx, name)
+		body, err := openSrc(ctx, o, name)
 		if err != nil {
 			return err
 		}
@@ -161,6 +182,14 @@ func copyOne(ctx context.Context, o Options, retry *dav.Retrier, name string, si
 		return o.Dst.PutStream(ctx, abs, size, body)
 	})
 	return false, err
+}
+
+// openSrc 按相对名打开源端对象:带 covers/ 前缀的走封面命名空间。
+func openSrc(ctx context.Context, o Options, name string) (io.ReadCloser, error) {
+	if rel, ok := strings.CutPrefix(name, remote.CoversDir+"/"); ok {
+		return o.Src.GetCoverBlobBody(ctx, rel)
+	}
+	return o.Src.GetBlobBody(ctx, name)
 }
 
 func hashStream(open func() (io.ReadCloser, error)) ([sha256.Size]byte, error) {
