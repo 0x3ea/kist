@@ -23,6 +23,14 @@ func main() {
 		Title:  "kist",
 		Width:  1024,
 		Height: 768,
+		// 显式上限绕过 wails#2431:v2 的 Linux 前端无条件调
+		// gtk_window_set_geometry_hints(GDK_HINT_MAX_SIZE),未配置时拿
+		// "显示器尺寸 + 装饰补偿差值"当上限,在原生 Wayland(实测 KDE)下
+		// 差值算错 → 窗口被幻影上限卡死:最大化被 WM 拒绝、拖边不可缩放。
+		// 显式给一个远超任何显示器的值后上限形同虚设,两处恢复正常;
+		// 若日后升 v3(PR #4047 已修)可移除。
+		MaxWidth:  16384,
+		MaxHeight: 16384,
 		AssetServer: &assetserver.Options{
 			Assets: assets,
 		},
