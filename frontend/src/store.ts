@@ -295,6 +295,9 @@ export async function loadFolder(id: number) {
     store.folder.summaries = v.Summaries ?? {}
     store.selection.clear()
     store.folderSelection.clear()
+    // 换目录即离开原选中文件:详情面板一并收起,否则面板停留在
+    // 不属于当前目录的旧条目上(与上面两个选中集清空同理)
+    store.detail = null
   } catch (e) {
     fail(e)
   }
