@@ -247,7 +247,9 @@ func (db *DB) FolderSummaries(ids []int64) (map[int64]FolderSummary, error) {
 //  2. 派生拼贴:直接子条目(目录与文件)名称自然序的前四个,每格取该子条目的
 //     封面——子文件看缩略图,子目录递归取其自定义封面或子树内首个有缩略图的
 //     文件;无封面的子条目不跳过,该格记 0(位置即信息,第几格空缺一目了然),
-//     子条目不足四个时尾部留白(返回值变短);
+//     子条目不足四个时尾部留白(返回值变短)。派生只产"宫格":唯一子条目的
+//     单槽一律回落空切片——满铺语义专属自定义封面,否则 A 只含子目录 B 时,
+//     A 会顶着 B 里首个文件的封面,读起来像"该目录就是这个文件";
 //  3. 默认四格:无任何子条目时返回空切片,由渲染端按目录名 hash 稳定挑内置占位图,
 //     渲染期决定、零存储。
 func (t *sumTree) resolveCover(n *sumNode, memo map[int64][]int64, repMemo map[int64]int64) []int64 {
@@ -288,6 +290,11 @@ func (t *sumTree) resolveCover(n *sumNode, memo map[int64][]int64, repMemo map[i
 	ids := make([]int64, len(slots))
 	for i, s := range slots {
 		ids[i] = s.id
+	}
+	// 单槽派生回落(含唯一子条目无缩略图的 [0]):前端对空切片/全空格都渲染
+	// 默认文件夹图标,两种写法等效,统一归一成空切片
+	if len(ids) == 1 {
+		ids = []int64{}
 	}
 	memo[n.id] = ids
 	return ids

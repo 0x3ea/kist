@@ -147,7 +147,7 @@ GUI 是纯壳:**零业务逻辑,只编排 internal/***。与 CLI 的关系是同
 
 **files.pack**(TODO-15,schema v2):目录打包条目标记——明文区是一个标准 zip(Store),get 还原成文件夹;其 size 为量化后显示值。
 
-**目录元数据**(TODO-16,schema v3):`folders.note/user_meta/cover_file_id` 与 `tags`/`folder_tags` 两表。tag 走独立表(过滤是 tag 的全部意义);`cover_file_id` 指向普通文件,复用全部文件管线,不发明封面 blob 类别。**元数据三不原则**:不继承、不合并、无告警——聚合面(`FolderSummary`)只聚合计数,永不聚合元数据。`FolderSummary` 纯查询零维护:全量内存建树(不用递归 CTE)后序聚合 PackCount/FileCount/TotalSize/LatestAt/PendingCount,封面三级回退链同一次遍历解析(自定义单图 → 子条目名称序前四的 2×2 宫格、空位记 0 不跳过 → 空作品交渲染端)。
+**目录元数据**(TODO-16,schema v3):`folders.note/user_meta/cover_file_id` 与 `tags`/`folder_tags` 两表。tag 走独立表(过滤是 tag 的全部意义);`cover_file_id` 指向普通文件,复用全部文件管线,不发明封面 blob 类别。**元数据三不原则**:不继承、不合并、无告警——聚合面(`FolderSummary`)只聚合计数,永不聚合元数据。`FolderSummary` 纯查询零维护:全量内存建树(不用递归 CTE)后序聚合 PackCount/FileCount/TotalSize/LatestAt/PendingCount,封面三级回退链同一次遍历解析(自定义单图 → 子条目名称序前四的 2×2 宫格、空位记 0 不跳过 → 空作品交渲染端;派生单槽——唯一子条目——回落空切片,满铺语义专属自定义封面)。
 
 **文件元数据**(TODO-17,schema v4):`file_tags` 镜像 folder_tags、共享 `tags` 词表——两种作品形态同一词典,死词清理必须 UNION 双表(任一侧清空不得误删另一形态仍在用的同名词);文件封面不是引用而是**自身的 thumbnails 行**,GUI「导入封面」走上传同款 `MakeThumbnail` 管线直写(覆盖语义:pack 的自动首页缩略图被顶掉后清除不恢复;坏图报错不静默,与上传侧的"失败即跳过"相反);`Search` 文件侧补 tag 命中(EXISTS 子查询),`FileHit` 回填 Tags。
 

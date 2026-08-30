@@ -257,9 +257,10 @@ func TestCoverFallbackChain(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	// 设定集的直接子条目只有 notes.txt(有缩略图)
-	if !slices.Equal(sSub.CoverFileIDs, []int64{notes}) {
-		t.Fatalf("子目录四宫格: %v", sSub.CoverFileIDs)
+	// 设定集的直接子条目只有 notes.txt(有缩略图):单槽派生不构成宫格,
+	// 回落空切片(渲染端显示默认文件夹图标,满铺专属自定义封面)
+	if len(sSub.CoverFileIDs) != 0 {
+		t.Fatalf("子目录单槽应回落: %v", sSub.CoverFileIDs)
 	}
 	_ = coverA
 
@@ -291,6 +292,32 @@ func TestCoverFallbackChain(t *testing.T) {
 	}
 
 	_ = ch2
+}
+
+// TestCoverSingleDerivedSlotFallsBack 回归:索引里只有 ./A/B/{1,2,3}.epub 时,
+// B 正常三格宫格,A 唯一子条目是目录 B——若不回落,A 会满铺 B 的代表文件
+// (1.epub)的封面,读起来像"该目录就是这个文件"。
+func TestCoverSingleDerivedSlotFallsBack(t *testing.T) {
+	db := newTestDB(t)
+	idA := mustFolder(t, db, "A")
+	idB := mustFolder(t, db, "A", "B")
+	f1 := mustFileRow(t, db, row("1.epub", idB, false, "ready", 10, 1))
+	f2 := mustFileRow(t, db, row("2.epub", idB, false, "ready", 11, 2))
+	f3 := mustFileRow(t, db, row("3.epub", idB, false, "ready", 12, 3))
+	for _, id := range []int64{f1, f2, f3} {
+		mustThumb(t, db, id)
+	}
+
+	sums, err := db.FolderSummaries([]int64{idA, idB})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := sums[idB].CoverFileIDs; !slices.Equal(got, []int64{f1, f2, f3}) {
+		t.Fatalf("B 三格宫格: %v", got)
+	}
+	if got := sums[idA].CoverFileIDs; len(got) != 0 {
+		t.Fatalf("A 单槽派生应回落空切片: %v", got)
+	}
 }
 
 func TestCoverMixedOrderAndLimit(t *testing.T) {

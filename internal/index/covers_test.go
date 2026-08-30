@@ -377,19 +377,21 @@ func TestCoverSurvivesSnapshot(t *testing.T) {
 }
 
 // TestCoverLegacyFallbackInSummary 仅有 legacy thumbnails 行时,聚合的封面
-// 链仍应命中(迁移完成前的过渡期回归)。
+// 链仍应命中(迁移完成前的过渡期回归)。配一个无缩略图的第二话占位:
+// 单槽派生会回落空切片,双槽才能证明 legacy 行真的进了链。
 func TestCoverLegacyFallbackInSummary(t *testing.T) {
 	db := newTestDB(t)
 	folderID := mustFolder(t, db, "作品")
 	id := mustFile(t, db, folderID, "第一话", "")
 	mustThumb(t, db, id)
+	_ = mustFile(t, db, folderID, "第二话", "")
 
 	sums, err := db.FolderSummaries([]int64{folderID})
 	if err != nil {
 		t.Fatal(err)
 	}
 	s := sums[folderID]
-	if len(s.CoverFileIDs) != 1 || s.CoverFileIDs[0] != id {
+	if len(s.CoverFileIDs) != 2 || s.CoverFileIDs[0] != id || s.CoverFileIDs[1] != 0 {
 		t.Fatalf("legacy 行应进封面链: %v", s.CoverFileIDs)
 	}
 }
