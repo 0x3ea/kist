@@ -1,10 +1,13 @@
 <script setup lang="ts">
 // DetailPanel.vue — 右侧详情:缩略图、虚拟路径、大小/密文、加密与上传时间、
 // sha256、备注编辑(保存调 SetNote)。目录不走此面板(元数据另走对话框)。
+// 面板常驻占位(v-if 在内容而非面板上):若选中才挂载,网格会因右栏突然
+// 出现而重排列数,卡片在点击瞬间变宽——点击目标漂移,观感突兀。
 import { ref, watch } from 'vue'
 import { store, saveNote } from '../store'
 import { fullTime, humanSize } from '../format'
 import { fileKind } from '../fileIcon'
+import { MousePointerClick } from 'lucide-vue-next'
 
 const noteDraft = ref('')
 const saving = ref(false)
@@ -24,7 +27,12 @@ async function onSaveNote() {
 </script>
 
 <template>
-  <aside v-if="store.detail" class="panel">
+  <aside class="panel">
+    <div v-if="!store.detail" class="empty">
+      <MousePointerClick :size="28" :stroke-width="1.5" />
+      <p>点击文件查看详情</p>
+    </div>
+    <template v-else>
     <div class="thumb">
       <img v-if="store.thumbs.get(store.detail.ID)" :src="store.thumbs.get(store.detail.ID)" alt="" />
       <component
@@ -60,6 +68,7 @@ async function onSaveNote() {
       <textarea v-model="noteDraft" rows="3" />
       <button :disabled="saving" @click="onSaveNote">保存备注</button>
     </label>
+    </template>
   </aside>
 </template>
 
@@ -74,6 +83,18 @@ async function onSaveNote() {
   flex-direction: column;
   gap: 10px;
   flex-shrink: 0;
+}
+
+/* 空态:居中提示,面板不因无选中而塌缩 */
+.empty {
+  margin: auto;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 8px;
+  color: var(--dim);
+  font-size: 12px;
+  opacity: 0.7;
 }
 
 .thumb {
