@@ -41,7 +41,7 @@ cmd/kistctl(CLI 壳,1440 行)        main.go+app*.go(Wails GUI 壳,Phase 7:31 �
 
 | 包 | 行数 | 职责 | 关键文件/入口 |
 |---|---|---|---|
-| transfer | ~2100 | 管线全部行为:并发调度、进度、取消、临时文件、文件夹打包(TODO-15)、出站箱、gc、缩略图、封面出库与迁移(TODO-10) | `manager.go`(调度)、`upload.go`/`download.go`(旅程)、`pack.go`(粒度/zip/解压)、`push.go`(出站箱)、`gc.go`(两命名空间)、`cover.go`(ImportCover/加密出库)、`covermigrate.go`(存量迁移)、`thumb.go` |
+| transfer | ~2100 | 管线全部行为:并发调度、进度、取消、临时文件、文件夹打包(TODO-15)、出站箱、gc、缩略图(图片 + epub 封面抽取)、封面出库与迁移(TODO-10) | `manager.go`(调度)、`upload.go`/`download.go`(旅程)、`pack.go`(粒度/zip/解压)、`push.go`(出站箱)、`gc.go`(两命名空间)、`cover.go`(ImportCover/加密出库)、`covermigrate.go`(存量迁移)、`thumb.go`、`epub.go`(epub 封面) |
 | index | ~1900 | SQLite 明文索引:虚拟目录、文件账本、目录/文件元数据 tag(TODO-16/17)、子树聚合、封面轻引用(TODO-10)、blob 登记、revision、快照/替换/库文件迁移 | `db.go`(打开/WithTx/快照/替换/MigrateIndexFile)、`schema.go`(迁移)、`files.go`、`folders.go`、`summary.go`(聚合+封面三级链)、`covers.go`、`blobs.go`、`outbox.go`、`thumbnails.go`(legacy 只读) |
 | crypto | 754 | 加密核心:口令→MK 包装(keyfile)、流式分块加解密(blob)、v2 大小量化 | `blob.go`(Writer/Reader)、`keyfile.go`、`format.go`(常量与档位)、`keys.go`(HKDF) |
 | dav | 542 | WebDAV 语义 + 网络可靠性:定长 PUT、流式 GET、O(1) Probe、重试退避 | `client.go`、`retry.go` |
@@ -91,7 +91,7 @@ GUI 是纯壳:**零业务逻辑,只编排 internal/***。与 CLI 的关系是同
    - **v2 量化**(默认开,TODO-08):Close 前补零到档位——≤1MiB 归 4KiB 倍数(空文件 4KiB 档),大文件按 10% 阶梯。补零走与真实数据完全相同的分块/认证路径,但**绝不计入 OrigSize 与 SHA-256**。设 `"size_padding":"off"` 则写 v1(精确大小)。
    - **pack 任务**(TODO-15):源是目录——`zip.NewWriter` 直挂 BlobWriter 单遍流式(条目全 Store 不再压缩,空目录写显式条目,条目 mtime 入 zip),词法序第一张图记为封面候选。索引行 `pack=1`,size 记 `bw.PlainTotal()`(v2 即档位值,**显示口径**——真实 origSize 在 sealedMeta,不得用索引 size 推明文长度),原目录规模(orig_size/entries)写 user_meta。
    - 头部 156B:40B 明文头 + 116B sealedMeta(加密的 fileID/origSize/chunkSize/noncePrefix/明文SHA/mtime/revision/deviceID)。Writer 先占位,Close 时 Seek 回填——源文件单遍读取。
-5. **缩略图与封面出库**(`thumb.go` + `upload.go` 阶段二点五,仅图片):嗅探 512B 判型(jpeg/png/gif/bmp/webp),最长边 512px,JPEG q80 降级 / 透明转 PNG,≤128KB。生成成功后**就地加密成独立封面 blob**(随机名,v2 量化,与文件同分块设置)——封面上传失败只 Warn 降级为"本次无封面",绝不阻断文件上传;**自动封面引用与文件行同一事务写(见第 8 步),不额外计 revision**(TODO-10 拆掉批量导入的备份放大器)。**任何失败只 Warn 不阻断**;非图片静默跳过。
+5. **缩略图与封面出库**(`thumb.go`/`epub.go` + `upload.go` 阶段二点五,仅图片与 epub):嗅探 512B 判型(jpeg/png/gif/bmp/webp),最长边 512px,JPEG q80 降级 / 透明转 PNG,≤128KB;epub 按扩展名分流,封面从包内抽取(`epub.go`:EPUB3 properties cover-image → EPUB2 meta → cover.* 名称回退,errNoCover 属预期静默跳过)。生成成功后**就地加密成独立封面 blob**(随机名,v2 量化,与文件同分块设置)——封面上传失败只 Warn 降级为"本次无封面",绝不阻断文件上传;**自动封面引用与文件行同一事务写(见第 8 步),不额外计 revision**(TODO-10 拆掉批量导入的备份放大器)。**任何失败只 Warn 不阻断**;非图片与 epub 无封面静默跳过。
 6. **blob 名** = 16 随机字节 hex(32 字符),与文件名完全无关 → 并发上传永不撞名,重名消解推迟到索引事务内(`UniqueFileName` 追加 "(1)")。
 7. **分岔**:
    - **直接上传**:整文件 PUT(`dav.PutFile`:显式 Content-Length 防保守网盘拒收 chunked;`SectionReader+NoCloser` 包装,因为 `http.Transport` 会 Close 裸传的 `*os.File`,重试必失败)→ 封面 PUT(小对象,进 `/kist/covers/`,EnsureCoversRoot 记忆化只发一次 MKCOL)。成功后**同一事务**写:files 行 + covers 引用(derived/ready)+ blobs 登记×2 + revision+1。

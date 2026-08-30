@@ -133,8 +133,9 @@ func (m *Manager) runUpload(j *job) error {
 	cipherSize := cipherSt.Size()
 	m.setTotal(tr, int64(meta.OrigSize)+cipherSize) // 进度总数 = 加密字节 + 上传字节
 
-	// ---- 阶段二:缩略图(仅图片;任何失败只忽略,绝不阻断上传)----
-	// pack 用词法序第一页做封面(TODO-15);无图的 pack 不生成
+	// ---- 阶段二:缩略图(仅图片与 epub;任何失败只忽略,绝不阻断上传)----
+	// pack 用词法序第一页做封面(TODO-15);无图的 pack 不生成。
+	// epub 的封面从包内抽取(EPUB3 cover-image → EPUB2 meta → cover.* 回退)
 	thumbSrc := j.srcPath
 	if j.pack {
 		thumbSrc = packFirstImage
@@ -143,8 +144,9 @@ func (m *Manager) runUpload(j *job) error {
 	if thumbSrc != "" {
 		if td, terr := MakeThumbnail(thumbSrc); terr == nil {
 			thumb = &td
-		} else if !errors.Is(terr, errNotImage) {
-			// 是图片却生成失败:留痕供排查(TODO-07 静默黑洞);非图片属预期,静默跳过
+		} else if !errors.Is(terr, errNotImage) && !errors.Is(terr, errNoCover) {
+			// 是图片却生成失败:留痕供排查(TODO-07 静默黑洞);非图片与
+			// epub 无封面属预期,静默跳过
 			slog.Warn("缩略图生成失败,已忽略", "path", thumbSrc, "err", terr)
 		}
 	}

@@ -145,7 +145,7 @@ async function onClearCover() {
         <div class="cover-ops">
           <button :disabled="busy" @click="onImportCover">导入封面…</button>
           <button :disabled="busy || !coverURL" @click="onClearCover">清除封面</button>
-          <p class="hint">本地图片导入,随索引备份同步;epub/mp4 等无缩略图内容由此获得封面。</p>
+          <p class="hint">本地图片导入,随索引备份同步;mp4 等无自动缩略图的内容由此获得封面(epub 上传时已自动抽包内封面)。</p>
         </div>
       </div>
       <p class="hint">留空不变;备注/标签清空即删除;目录封面引用需为有缩略图的文件。</p>

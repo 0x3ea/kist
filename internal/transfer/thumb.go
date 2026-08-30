@@ -11,6 +11,8 @@ import (
 	"io"
 	"net/http"
 	"os"
+	"path/filepath"
+	"strings"
 
 	"golang.org/x/image/bmp"
 	"golang.org/x/image/draw"
@@ -36,10 +38,16 @@ type ThumbData struct {
 	W, H int
 }
 
-// MakeThumbnail 为图片文件生成缩略图。解码/缩放/编码任一步失败都返回错误:
-// 上传管线据此选择忽略(缩略图绝不阻断上传);GUI 封面导入则是显式用户
-// 动作,错误应原样上抛而非静默——两种策略都在调用方。
+// MakeThumbnail 为图片文件生成缩略图(epub 例外:封面从包内抽取,见 epub.go)。
+// 解码/缩放/编码任一步失败都返回错误:上传管线据此选择忽略(缩略图绝不阻断
+// 上传);GUI 封面导入则是显式用户动作,错误应原样上抛而非静默——两种策略
+// 都在调用方。
 func MakeThumbnail(srcPath string) (ThumbData, error) {
+	// epub 是 zip 容器,内容嗅探只会得到 application/zip:按扩展名分流
+	if strings.EqualFold(filepath.Ext(srcPath), ".epub") {
+		return epubThumbnail(srcPath)
+	}
+
 	var t ThumbData
 	f, err := os.Open(srcPath)
 	if err != nil {
@@ -54,27 +62,30 @@ func MakeThumbnail(srcPath string) (ThumbData, error) {
 	if _, err := f.Seek(0, io.SeekStart); err != nil {
 		return t, err
 	}
-	var img image.Image
-	switch ct := http.DetectContentType(head); ct {
-	case "image/jpeg":
-		img, err = jpeg.Decode(f)
-	case "image/png":
-		img, err = png.Decode(f)
-	case "image/gif":
-		img, err = gif.Decode(f) // 只取首帧
-	case "image/bmp":
-		img, err = bmp.Decode(f)
-	case "image/webp":
-		img, err = webp.Decode(f)
-	default:
-		return t, fmt.Errorf("%w %q", errNotImage, ct)
-	}
+	img, err := decodeImage(head, f)
 	if err != nil {
 		return t, err
 	}
+	return encodeThumb(fitEdge(img, thumbMaxEdge), thumbMaxBytes)
+}
 
-	img = fitEdge(img, thumbMaxEdge)
-	return encodeThumb(img, thumbMaxBytes)
+// decodeImage 嗅探并解码图片:head 是开头若干字节(≥512 最佳,供
+// DetectContentType 判型),r 是完整字节流。不受支持的类型返回 errNotImage
+func decodeImage(head []byte, r io.Reader) (image.Image, error) {
+	switch ct := http.DetectContentType(head); ct {
+	case "image/jpeg":
+		return jpeg.Decode(r)
+	case "image/png":
+		return png.Decode(r)
+	case "image/gif":
+		return gif.Decode(r) // 只取首帧
+	case "image/bmp":
+		return bmp.Decode(r)
+	case "image/webp":
+		return webp.Decode(r)
+	default:
+		return nil, fmt.Errorf("%w %q", errNotImage, ct)
+	}
 }
 
 // fitEdge 等比缩放使最长边不超过 maxEdge;已达标则原样返回。
