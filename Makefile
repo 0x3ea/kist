@@ -3,13 +3,16 @@
 
 TAGS := -tags webkit2_41
 
-.PHONY: dev build test check fmt
+.PHONY: dev build cli test check fmt
 
 dev: ## 开发模式:热重载打开窗口(前端 vite + Go 绑定)
 	wails dev $(TAGS)
 
 build: ## 发布构建 → build/bin/kist(前端 vue-tsc + vite 先行)
 	wails build $(TAGS)
+
+cli: ## CLI 构建 → build/bin/kistctl(kistctl-sandbox 指向这里)
+	go build -o build/bin/kistctl ./cmd/kistctl
 
 test: ## 全量测试(竞态检测)
 	go test ./... -race -count=1

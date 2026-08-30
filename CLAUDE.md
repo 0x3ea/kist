@@ -15,13 +15,17 @@ kist —— WebDAV 加密网盘管理器(Go + Wails v2)。CLI 与 GUI 共享 `in
 
 ```bash
 # 阶段收尾验收(必跑,全绿才算完)
-go build ./... && go vet ./... && gofmt -l . && go test ./... -race -count=1
+make check                          # = go build + vet + gofmt 检查 + 全量测试(-race)
+
+# 构建与开发(所有 wails 命令已由 Makefile 统一封装 -tags webkit2_41,
+# Arch 仓库已无 webkit2gtk-4.0,该 tag 恒必带;直接手敲 wails 命令时勿漏)
+make build                          # GUI 发布构建 → build/bin/kist
+make cli                            # CLI → build/bin/kistctl
+make dev                            # 热重载开发窗口
 
 # 本地试用(零污染:数据在 .sandbox/,已 gitignore)
-./kistctl-sandbox <子命令>          # 沙盒模式
-./kistctl <子命令>                  # 正式模式(→ dist/ 下的发布二进制)
-
-# GUI(Phase 6 系统依赖装好后):所有 wails 命令必须带 -tags webkit2_41
+./kistctl-sandbox <子命令>          # 沙盒模式(KIST_HOME 固定 .sandbox/)
+build/bin/kistctl <子命令>          # 正式模式
 ```
 
 ## 代码与提交约定
