@@ -8,7 +8,7 @@ import { humanSize } from '../format'
 import CoverMosaic from './CoverMosaic.vue'
 import { onMounted, watchEffect } from 'vue'
 
-defineEmits<{ open: [id: number] }>()
+defineEmits<{ open: [id: number]; menu: [e: MouseEvent, entry: index.Entry] }>()
 
 // 有缩略图的文件卡预取缩略图(负缓存下不反复请求)
 watchEffect(() => {
@@ -41,6 +41,7 @@ function cardClick(e: index.Entry) {
       class="card"
       :class="{ sel: e.IsFolder ? store.folderSelection.has(e.ID) : store.selection.has(e.ID) }"
       @click="e.IsFolder ? $emit('open', e.ID) : cardClick(e)"
+      @contextmenu.prevent="$emit('menu', $event, e)"
     >
       <span
         class="check"

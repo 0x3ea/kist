@@ -5,7 +5,7 @@ import { index } from '../../wailsjs/go/models'
 import { store, summaryText, openDetail } from '../store'
 import { humanSize, shortTime } from '../format'
 
-defineEmits<{ open: [id: number] }>()
+defineEmits<{ open: [id: number]; menu: [e: MouseEvent, entry: index.Entry] }>()
 
 function toggleFile(id: number) {
   store.selection.has(id) ? store.selection.delete(id) : store.selection.add(id)
@@ -46,6 +46,7 @@ function stateTag(e: index.Entry): string {
         :key="e.ID"
         :class="{ sel: e.IsFolder ? store.folderSelection.has(e.ID) : store.selection.has(e.ID) }"
         @click="e.IsFolder ? null : onRowClick(e)"
+        @contextmenu.prevent="$emit('menu', $event, e)"
       >
         <td class="c-check" @click.stop>
           <input

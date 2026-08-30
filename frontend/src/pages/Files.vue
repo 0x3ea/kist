@@ -1,8 +1,10 @@
 <script setup lang="ts">
 // Files.vue — 主浏览页:搜索框(300ms 防抖,文件名/备注/目录名/标签)、工具栏
-// (上传文件/文件夹、下载、移动、元数据、删除、视图切换)、面包屑、列表/网格
-// 双视图、右侧详情面板。目录进入 = loadFolder;搜索态点击目录 = 跳进该目录。
+// (上传文件/文件夹、新建文件夹、下载、视图切换;操作类入口已收进右键菜单,
+// 见 TODO-20)、面包屑、列表/网格双视图、右侧详情面板。
+// 目录进入 = loadFolder;搜索态点击目录 = 跳进该目录。
 import { computed, ref } from 'vue'
+import { index } from '../../wailsjs/go/models'
 import {
   store,
   loadFolder,
@@ -20,6 +22,7 @@ import MoveDialog from '../components/MoveDialog.vue'
 import MetaDialog from '../components/MetaDialog.vue'
 import NewFolderDialog from '../components/NewFolderDialog.vue'
 import RenameDialog from '../components/RenameDialog.vue'
+import ContextMenu, { type CtxItem } from '../components/ContextMenu.vue'
 import { humanSize } from '../format'
 
 const query = ref('')
@@ -80,6 +83,55 @@ function onMeta() {
   const e = store.folder.entries.find((x) => x.ID === id)
   if (e) metaTarget.value = { mode: 'file', id, name: e.Name, pack: e.Pack }
 }
+
+// ---- 右键菜单(TODO-20):右键即选(目标不在选区时变为唯一选中,已在
+// 选区则保持多选,配合勾选框可先多选再右键批量操作),条目按选区算禁用态;
+// 四个动作与被移除的工具栏按钮同函数,行为逐项一致。
+const ctxPos = ref<{ x: number; y: number } | null>(null)
+
+function onEntryMenu(e: MouseEvent, entry: index.Entry) {
+  const sel = entry.IsFolder ? store.folderSelection : store.selection
+  if (!sel.has(entry.ID)) {
+    store.selection.clear()
+    store.folderSelection.clear()
+    sel.add(entry.ID)
+  }
+  ctxPos.value = { x: e.clientX, y: e.clientY }
+}
+
+const ctxItems = computed<CtxItem[]>(() => {
+  const nFiles = store.selection.size
+  const nFolders = store.folderSelection.size
+  const single = nFiles + nFolders === 1
+  return [
+    {
+      label: '重命名',
+      // 后端 RenameFolder 只支持目录(TODO-19);文件重命名落地前保持禁用明示
+      disabled: !(nFolders === 1 && nFiles === 0),
+      title: nFolders === 1 && nFiles === 0 ? '' : '仅支持重命名单个目录(文件重命名尚未支持)',
+      action: onRename,
+    },
+    {
+      label: '移动',
+      // MoveFiles 只支持文件;目录移动是 TODO-19 立项时明示的范围外
+      disabled: nFiles === 0,
+      title: nFiles === 0 ? '仅支持移动文件(目录移动尚未支持)' : '',
+      action: () => (showMove.value = true),
+    },
+    {
+      label: '元数据',
+      disabled: !single,
+      title: single ? '' : '恰好选中一个条目时可用',
+      action: onMeta,
+    },
+    {
+      label: single ? '删除' : `删除 ${nFiles + nFolders} 项`,
+      disabled: nFiles + nFolders === 0,
+      danger: true,
+      action: onDelete,
+    },
+  ]
+})
 </script>
 
 <template>
@@ -97,16 +149,7 @@ function onMeta() {
       <button @click="onUpload('files')">上传文件</button>
       <button @click="onUpload('folder')">上传文件夹</button>
       <button @click="showNewFolder = true">新建文件夹</button>
-      <button :disabled="store.folderSelection.size !== 1" @click="onRename">重命名</button>
       <button :disabled="store.selection.size === 0" @click="downloadSelected">下载</button>
-      <button :disabled="store.selection.size === 0" @click="showMove = true">移动</button>
-      <button
-        :disabled="store.folderSelection.size !== 1 && !(store.folderSelection.size === 0 && store.selection.size === 1)"
-        @click="onMeta"
-      >
-        元数据
-      </button>
-      <button class="danger" :disabled="selTotal === 0" @click="onDelete">删除</button>
       <button class="view" :title="store.view === 'grid' ? '切到列表' : '切到网格'" @click="store.view = store.view === 'grid' ? 'list' : 'grid'">
         {{ store.view === 'grid' ? '☰' : '▦' }}
       </button>
@@ -150,8 +193,8 @@ function onMeta() {
       </div>
       <div class="body">
         <div class="list-wrap">
-          <FileTable v-if="store.view === 'list'" @open="openFolder" />
-          <CardGrid v-else @open="openFolder" />
+          <FileTable v-if="store.view === 'list'" @open="openFolder" @menu="onEntryMenu" />
+          <CardGrid v-else @open="openFolder" @menu="onEntryMenu" />
         </div>
         <DetailPanel />
       </div>
@@ -173,6 +216,7 @@ function onMeta() {
       :pack="metaTarget.pack"
       @close="metaTarget = null"
     />
+    <ContextMenu v-if="ctxPos" :x="ctxPos.x" :y="ctxPos.y" :items="ctxItems" @close="ctxPos = null" />
   </div>
 </template>
 
