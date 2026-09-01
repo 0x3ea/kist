@@ -32,7 +32,8 @@ cmd/kistctl(CLI 壳,1440 行)        main.go+app*.go(Wails GUI 壳,Phase 7:31 �
                        网盘 /kist/  (主命名空间扁平:随机名 blob + keyfile + index.enc;
                           /kist/covers/ 封面子命名空间,TODO-10)
 
-  辅助:internal/config(KIST_HOME 与设置)、internal/errs(错误码)、internal/logging(kist.log)
+  辅助:internal/config(KIST_HOME 与设置)、internal/errs(错误码)、internal/logging(kist.log)、
+        internal/audit(audit.log 操作审计,TODO-14)
 ```
 
 依赖方向单向:crypto 最底层不依赖任何人;CLI/GUI 只是壳。**改动的爆炸半径**大致等于在图上跨了几层。
@@ -51,6 +52,7 @@ cmd/kistctl(CLI 壳,1440 行)        main.go+app*.go(Wails GUI 壳,Phase 7:31 �
 | config | 276 | KIST_HOME 路径、config.json(schema v2:drives[]+active 多盘档案,旧格式自动迁移)、盘 ID/查重、设置归一化 | `config.go` |
 | errs | 64 | AppError 错误码(CLI/GUI 共用文案映射) | `errs.go` |
 | logging | 58 | slog → KIST_HOME/kist.log,启动轮转留一代 | `logging.go` |
+| audit | 90 | 操作审计(TODO-14):每条 CLI 命令恰好一行 JSONL 落 audit.log(ts/cmd/ok/code/dur_ms/extra),main 单点收口;append-only 长留存不轮转,写失败不阻断命令 | `audit.go` |
 | cmd/kistctl | ~1900 | CLI 壳:20 个子命令、口令获取、参数重排、虚拟路径 | `main.go` |
 | 根 main/app | ~1770 | Wails GUI 壳(Phase 7):35 个绑定方法、多盘库生命周期(reopenVaultLocked)、事件转发、防抖自动备份、退出前备份;四页面 vue-ts ~2.4k 行(手写 CSS,零新前端依赖) | `app.go`(状态/解锁/多盘生命周期)、`app_browse.go`(浏览/元数据)、`app_transfer.go`(传输/维护)、`main.go`、`frontend/src/` |
 
@@ -137,7 +139,8 @@ GUI 是纯壳:**零业务逻辑,只编排 internal/***。与 CLI 的关系是同
 | outbox/ | 出站箱:待上传加密产物(文件+封面,TODO-10),**有意持久**,push/verify 后清 |
 | covers/ | 封面明文磁盘缓存(GUI,TODO-10):`<文件uuid>.<ext>`,LRU 预算 `cover_cache_mb` |
 | backups/ | 被替换/归档的旧索引(`index-<rev>-<ts>.db`、开新库归档的 `index-<盘ID>-<ts>.db`) |
-| kist.log | 运行日志(启动时超 5MiB 轮转留一代 .old) |
+| kist.log | 运行日志(启动时超 5MiB 轮转留一代 .old)——回答 why |
+| audit.log | 操作审计(TODO-14):每条 CLI 命令一行 JSONL(ts/cmd/ok/错误码/耗时/摘要),append-only 不轮转——回答 what/when;永不记口令/密钥/凭据/内容 |
 
 ## 7. 状态机与账本
 

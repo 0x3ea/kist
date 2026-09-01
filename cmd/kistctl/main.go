@@ -19,6 +19,7 @@ import (
 	"sync"
 	"time"
 
+	"kist/internal/audit"
 	"kist/internal/backup"
 	"kist/internal/config"
 	"kist/internal/crypto"
@@ -68,10 +69,31 @@ func main() {
 	if err := logging.Setup(); err != nil {
 		fmt.Fprintln(os.Stderr, "警告:日志初始化失败,降级为标准错误输出:", err)
 	}
-	if err := run(os.Args[1:]); err != nil {
+	// 操作审计(TODO-14):每命令恰好一条 JSONL 落 KIST_HOME/audit.log,
+	// 回答 what/when,与 kist.log 的 why 互补;写失败不改变命令退出码
+	args := os.Args[1:]
+	start := time.Now()
+	err := run(args)
+	audit.Log(actionOf(args), start, err)
+	if err != nil {
 		fmt.Fprintln(os.Stderr, "错误:", err)
 		os.Exit(1)
 	}
+}
+
+// actionOf 审计用的动作名:组命令(config/drive/outbox/covers/meta)带子
+// 动作,否则 push/discard 这类语义相反的操作在账本里分不开;其余取首词。
+func actionOf(args []string) string {
+	if len(args) == 0 {
+		return "(usage)" // 裸调用只回显用法,也记一笔失败,便于发现误用
+	}
+	switch args[0] {
+	case "config", "drive", "outbox", "covers", "meta":
+		if len(args) > 1 {
+			return args[0] + " " + args[1]
+		}
+	}
+	return args[0]
 }
 
 func run(args []string) error {
@@ -577,18 +599,21 @@ func newManager(cfg *config.StoredConfig, store *remote.Store, db *index.DB, mk 
 	})
 }
 
-// waitAndReport 等全部传输结束并汇总;返回失败/取消数(deferred 不算失败)。
-func waitAndReport(m *transfer.Manager) int {
+// waitAndReport 等全部传输结束并汇总;返回失败/取消数与成功落盘的字节量
+// (deferred 算成功不算失败,也计入字节摘要——出站箱产物是已完成的工作)。
+func waitAndReport(m *transfer.Manager) (int, int64) {
 	for !m.Idle() {
 		time.Sleep(100 * time.Millisecond)
 	}
-	fails := 0
+	fails, bytes := 0, int64(0)
 	for _, tr := range m.Snapshot() {
 		switch tr.Phase {
 		case transfer.PhaseDone:
 			fmt.Printf("  ✓ %s\n", tr.Name)
+			bytes += tr.BytesTotal
 		case transfer.PhaseDeferred:
 			fmt.Printf("  ⏸ 已入出站箱(待上传): %s\n", tr.Name)
+			bytes += tr.BytesTotal
 		case transfer.PhaseCanceled:
 			fmt.Printf("  – 已取消 %s\n", tr.Name)
 			fails++
@@ -597,7 +622,7 @@ func waitAndReport(m *transfer.Manager) int {
 			fails++
 		}
 	}
-	return fails
+	return fails, bytes
 }
 
 func cmdPut(args []string) error {
@@ -660,7 +685,9 @@ func cmdPut(args []string) error {
 		return err
 	}
 	fmt.Printf("已入队 %d 个文件\n", n)
-	if fails := waitAndReport(m); fails > 0 {
+	fails, bytes := waitAndReport(m)
+	audit.Set(map[string]any{"files": n, "bytes": bytes, "dest": *dest, "deferred": *deferUpload})
+	if fails > 0 {
 		return errs.New(errs.Internal, fmt.Sprintf("%d 个传输失败或被取消", fails))
 	}
 	return nil
@@ -788,7 +815,9 @@ func cmdOutboxPush(args []string) error {
 	}
 	n := m.PushPending(context.Background(), files, covers)
 	fmt.Printf("已入队 %d 个 push\n", n)
-	if fails := waitAndReport(m); fails > 0 {
+	fails, bytes := waitAndReport(m)
+	audit.Set(map[string]any{"files": len(files), "covers": len(covers), "bytes": bytes})
+	if fails > 0 {
 		if cfg.Settings.OutboxPushFail == "discard" {
 			return errs.New(errs.Internal,
 				fmt.Sprintf("%d 个 push 失败(discard 档):已回滚,可重新 put --defer 后手工搬运", fails))
@@ -820,6 +849,7 @@ func cmdOutboxVerify(args []string) error {
 	for _, r := range results {
 		fmt.Printf("%s\t%s\t%s\n", r.Blob, r.Action, r.Detail)
 	}
+	audit.Set(map[string]any{"checked": len(results)})
 	return nil
 }
 
@@ -838,6 +868,7 @@ func cmdOutboxDiscard(args []string) error {
 		}
 		fmt.Printf("已放弃 %s(索引行与本地产物已删)\n", name)
 	}
+	audit.Set(map[string]any{"blobs": len(args)})
 	return nil
 }
 
@@ -1034,6 +1065,7 @@ func cmdMetaSet(args []string) error {
 	if fs.NArg() == 0 {
 		return errs.New(errs.BadConfig, "meta set 需要 <目录路径|文件uuid|id>(目录从根写起,如 /作品A)")
 	}
+	audit.Set(map[string]any{"target": fs.Arg(0)})
 	db, err := openIndex()
 	if err != nil {
 		return err
@@ -1225,6 +1257,7 @@ func cmdMkdir(args []string) error {
 	}); err != nil {
 		return errs.From(err) // 非法段("."/"..")在这里被拒
 	}
+	audit.Set(map[string]any{"path": virtualPathOf(segs)})
 	fmt.Printf("已确保目录存在:%s(id %d,纯索引操作零流量)\n", virtualPathOf(segs), id)
 	return nil
 }
@@ -1236,6 +1269,7 @@ func cmdRename(args []string) error {
 	if len(args) != 2 {
 		return errs.New(errs.BadConfig, "用法:kistctl rename </目录路径|文件uuid|id> <新名>(如 kistctl rename /漫画库/作品A 新名字)")
 	}
+	audit.Set(map[string]any{"target": args[0], "to": args[1]})
 	db, err := openIndex()
 	if err != nil {
 		return err
@@ -1312,6 +1346,7 @@ func cmdMv(args []string) error {
 	if err := db.MoveFiles(ids, destID); err != nil {
 		return errs.From(err)
 	}
+	audit.Set(map[string]any{"files": len(ids), "dest": fs.Args()[fs.NArg()-1]})
 	// 重名消解可能改了文件名,重取行打印实际落点
 	for _, id := range ids {
 		f, err := db.GetFile(id)
@@ -1388,7 +1423,9 @@ func cmdGet(args []string) error {
 		return err
 	}
 	fmt.Printf("下载到 %s\n", destDir)
-	if fails := waitAndReport(m); fails > 0 {
+	fails, bytes := waitAndReport(m)
+	audit.Set(map[string]any{"id": fs.Arg(0), "to": destDir, "bytes": bytes})
+	if fails > 0 {
 		return errs.New(errs.Internal, "下载失败或被取消")
 	}
 	return nil
@@ -1493,6 +1530,7 @@ func cmdNote(args []string) error {
 	if fs.NArg() == 0 {
 		return errs.New(errs.BadConfig, "note 需要 <uuid|id>")
 	}
+	audit.Set(map[string]any{"id": fs.Arg(0)})
 	db, err := openIndex()
 	if err != nil {
 		return err
@@ -1535,6 +1573,7 @@ func cmdRm(args []string) error {
 	defer db.Close()
 	var ids []int64
 	var blobNames []string
+	var names []string
 	for _, target := range fs.Args() {
 		f, err := resolveTarget(db, target)
 		if err != nil {
@@ -1542,6 +1581,7 @@ func cmdRm(args []string) error {
 		}
 		ids = append(ids, f.ID)
 		blobNames = append(blobNames, f.BlobName)
+		names = append(names, f.Name)
 	}
 	if err := db.SoftDeleteFiles(ids); err != nil {
 		return errs.From(err)
@@ -1556,8 +1596,20 @@ func cmdRm(args []string) error {
 	if err := db.MarkBlobTrash(blobNames); err != nil {
 		return errs.From(err)
 	}
+	// 名字进审计:事后取证的典型问题就是"删没删那个文件"(TODO-14)
+	audit.Set(map[string]any{"files": len(ids), "names": namesCapped(names)})
 	fmt.Printf("已软删除 %d 个文件(远端 blob 待 gc 清理)\n", len(ids))
 	return nil
+}
+
+// namesCapped 审计摘要里的目标名列表:超过上限截断并标注总数,
+// 防止一次批量 rm 把账本行撑成怪物(全量名单去 kist.log/索引里对)。
+func namesCapped(names []string) any {
+	const capN = 20
+	if len(names) <= capN {
+		return names
+	}
+	return append(names[:capN:capN], fmt.Sprintf("…共 %d 个", len(names)))
 }
 
 func cmdGc(args []string) error {
@@ -1579,6 +1631,10 @@ func cmdGc(args []string) error {
 	if err != nil {
 		return errs.From(err)
 	}
+	audit.Set(map[string]any{
+		"deleted": len(res.Deleted), "orphans": len(res.Orphans),
+		"cover_orphans": len(res.CoverOrphans), "dry_run": *dryRun,
+	})
 	if len(res.Deleted) == 0 && len(res.Orphans) == 0 && len(res.CoverOrphans) == 0 {
 		fmt.Println("无需清理")
 		return nil
@@ -1662,6 +1718,11 @@ func cmdCoversMigrate(args []string) error {
 		return errs.From(err)
 	}
 	if *dryRun {
+		audit.Set(map[string]any{"dry_run": true, "total": res.Total, "bytes": res.Bytes})
+	} else {
+		audit.Set(map[string]any{"migrated": res.Migrated, "skipped": res.Skipped, "failed": res.Failed})
+	}
+	if *dryRun {
 		fmt.Printf("待迁移 %d 行,共 %.1f MiB(每行 1 次上传请求;按 ~100 请求/分钟估算约 %.0f 分钟)\n",
 			res.Total, float64(res.Bytes)/(1<<20), float64(res.Total)/100.0)
 		fmt.Println("确认后执行:kistctl covers migrate --pass-stdin(--max N 可分批)")
@@ -1712,6 +1773,7 @@ func cmdBackup(args []string) error {
 	if err != nil {
 		return errs.From(err)
 	}
+	audit.Set(map[string]any{"revision": info.Revision, "bytes": info.Size})
 	fmt.Printf("备份完成:revision %d,加密后 %d 字节,%s\n",
 		info.Revision, info.Size, info.At.Format("2006-01-02 15:04:05"))
 	return nil
@@ -1745,6 +1807,7 @@ func cmdPull(args []string) error {
 	if err != nil {
 		return errs.From(err)
 	}
+	audit.Set(map[string]any{"action": res.Action, "remote_rev": res.RemoteRev, "local_rev": res.LocalRev})
 	switch res.Action {
 	case "replaced":
 		fmt.Printf("已从远端恢复索引(远端 revision %d > 本地 %d,来自设备 %s);旧库已归档在 backups/ 目录\n",
@@ -1799,6 +1862,7 @@ func cmdMigrate(args []string) error {
 	if err != nil {
 		return errs.Wrap(errs.DavError, err)
 	}
+	audit.Set(map[string]any{"copied": res.Copied, "skipped": res.Skipped, "failed": res.Failed, "bytes": res.Bytes})
 	fmt.Printf("迁移完成:复制 %d 个(%.1f MiB),跳过 %d 个(断点已完成),失败 %d 个\n",
 		res.Copied, float64(res.Bytes)/(1<<20), res.Skipped, res.Failed)
 	for _, f := range res.Failures {
