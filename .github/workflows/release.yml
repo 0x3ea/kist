@@ -1,0 +1,79 @@
+# Release — 推送 v* 标签时构建 Linux/Windows 双平台包并发布 GitHub Release。
+#
+# 产物命名沿用 docs/quickstart.md 的约定(dist/ 下的裸二进制,kistctl-<版本>-<os>-<arch>):
+#   kist-<版本>-linux-amd64(.tar 无壳裸 ELF,GUI)   kistctl-<版本>-linux-amd64(CLI)
+#   kist-<版本>-windows-amd64.exe(GUI)              kistctl-<版本>-windows-amd64.exe(CLI)
+#   checksums.txt(sha256)
+#
+# 平台策略沿用 Makefile 的既定前提:依赖纯 Go、无 CGO(modernc.org/sqlite),
+# Windows GUI 由 Linux 交叉编译(build-windows 同款);Linux GUI 原生编译需
+# webkit2gtk-4.1。发布前先跑一遍全量测试,红了不发。
+name: Release
+
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: write # 创建 Release 并上传产物
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: 安装 webkit2gtk 构建依赖与 wails CLI(版本钉住 go.mod)
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libgtk-3-dev libwebkit2gtk-4.1-dev xvfb
+          go install github.com/wailsapp/wails/v2/cmd/wails@v2.15.0
+
+      # 前端只构建一次,两次 wails build 都 -s 跳过(确定性 + 省时)
+      - name: 构建前端(产出 frontend/dist)
+        working-directory: frontend
+        run: npm ci && npm run build
+
+      - name: 发布前全量测试(-race)
+        run: xvfb-run -a make test
+
+      - name: 计算版本号(tag 名去 v 前缀)
+        run: echo "VERSION=${GITHUB_REF_NAME#v}" >> "$GITHUB_ENV"
+
+      # -ldflags 注入 version/commit(cmd/kistctl 与 GUI 关于框同源)
+      - name: 构建 Linux(GUI 原生 + CLI 静态)
+        run: |
+          LDFLAGS="-X main.version=$VERSION -X main.commit=${GITHUB_SHA::7}"
+          mkdir -p dist
+          wails build -tags webkit2_41 -s -ldflags "$LDFLAGS"
+          cp build/bin/kist "dist/kist-$VERSION-linux-amd64"
+          CGO_ENABLED=0 go build -trimpath -ldflags "-s -w $LDFLAGS" \
+            -o "dist/kistctl-$VERSION-linux-amd64" ./cmd/kistctl
+
+      - name: 构建 Windows(GUI 交叉 + CLI 交叉;纯 Go 无 CGO,Linux 直出)
+        run: |
+          LDFLAGS="-X main.version=$VERSION -X main.commit=${GITHUB_SHA::7}"
+          wails build -platform windows/amd64 -tags webkit2_41 -s -ldflags "$LDFLAGS"
+          cp build/bin/kist.exe "dist/kist-$VERSION-windows-amd64.exe"
+          CGO_ENABLED=0 GOOS=windows GOARCH=amd64 go build -trimpath -ldflags "-s -w $LDFLAGS" \
+            -o "dist/kistctl-$VERSION-windows-amd64.exe" ./cmd/kistctl
+
+      - name: 生成 sha256 校验和
+        working-directory: dist
+        run: sha256sum * > checksums.txt
+
+      - name: 发布 GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/*
+          generate_release_notes: true

@@ -1,0 +1,48 @@
+# CI — 阶段收尾验收在流水线上复刻:go build + vet + gofmt + 全量测试(-race),
+# 即 Makefile 的 `make check`。每次分支提交(push)自动执行;tags 推送不跑
+# (branches 过滤排除,** 只匹配分支名),发布走 release 工作流。
+name: CI
+
+on:
+  push:
+    branches: ['**']
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true # 同分支新提交顶掉旧跑,省额度
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    name: check(build + vet + gofmt + test -race)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod # 版本跟随 go.mod,升级不改编排
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      # GUI 壳有 //go:embed all:frontend/dist,dist 不进仓库(gitignore),
+      # 全新检出必须先产出它,否则 go build 直接失败
+      - name: 构建前端(产出 frontend/dist 供 go:embed)
+        working-directory: frontend
+        run: npm ci && npm run build
+
+      # wails v2 在 Linux 经 CGO 链接 webkit2gtk(go build ./... 含 GUI 包);
+      # xvfb 供无头 runner 保险(套件不建窗口,防 GTK 运行时偶发需要显示)
+      - name: 安装 webkit2gtk 构建依赖
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libgtk-3-dev libwebkit2gtk-4.1-dev xvfb
+
+      - name: make check
+        run: xvfb-run -a make check
