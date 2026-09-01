@@ -1,4 +1,8 @@
-# Release — 推送 v* 标签时构建 Linux/Windows 双平台包并发布 GitHub Release。
+# Release — 构建双平台包并发布 GitHub Release。两种触发:
+#   1. 推送 v* 标签(标准发版)
+#   2. Actions 页手动触发(workflow_dispatch):不提交 tag 也能出包。
+#      版本号取输入;留空则回退"最近一个 v* tag";连 tag 都没有(冷启动)
+#      则退化为 0.0.0-<短SHA>。产物挂到 v<版本> 的 Release 上(不存在则创建)。
 #
 # 产物命名沿用 docs/quickstart.md 的约定(dist/ 下的裸二进制,kistctl-<版本>-<os>-<arch>):
 #   kist-<版本>-linux-amd64(.tar 无壳裸 ELF,GUI)   kistctl-<版本>-linux-amd64(CLI)
@@ -13,6 +17,12 @@ name: Release
 on:
   push:
     tags: ['v*']
+  workflow_dispatch:
+    inputs:
+      version:
+        description: '版本号(不带 v 前缀,如 0.2.1;留空取最近 tag)'
+        required: false
+        default: ''
 
 permissions:
   contents: write # 创建 Release 并上传产物
@@ -21,7 +31,10 @@ jobs:
   release:
     runs-on: ubuntu-latest
     steps:
+      # fetch-depth 0:手动触发无 tag 时,git describe 需要完整历史才能找到最近 tag
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
       - uses: actions/setup-go@v5
         with:
@@ -47,8 +60,25 @@ jobs:
       - name: 发布前全量测试(-race)
         run: xvfb-run -a make test
 
-      - name: 计算版本号(tag 名去 v 前缀)
-        run: echo "VERSION=${GITHUB_REF_NAME#v}" >> "$GITHUB_ENV"
+      # 版本号优先级:手动输入 > 当前 tag(push 触发)> 最近 v* tag(describe)>
+      # 0.0.0-<短SHA>(冷启动兜底)。输入经 env 间接引用,不拼进命令防注入。
+      - name: 计算版本号
+        env:
+          INPUT_VERSION: ${{ inputs.version }}
+        run: |
+          V="$INPUT_VERSION"
+          if [ -z "$V" ] && [ "$GITHUB_REF_TYPE" = "tag" ]; then
+            V="${GITHUB_REF_NAME#v}"
+          fi
+          if [ -z "$V" ]; then
+            V="$(git describe --tags --match 'v*' --abbrev=0 2>/dev/null || true)"
+            V="${V#v}"
+          fi
+          if [ -z "$V" ]; then
+            V="0.0.0-${GITHUB_SHA::7}"
+          fi
+          echo "VERSION=$V" >> "$GITHUB_ENV"
+          echo "发布版本:$VERSION"
 
       # -ldflags 注入 version/commit(cmd/kistctl 与 GUI 关于框同源)
       - name: 构建 Linux(GUI 原生 + CLI 静态)
@@ -72,8 +102,11 @@ jobs:
         working-directory: dist
         run: sha256sum * > checksums.txt
 
+      # tag_name 显式指定:手动触发时 ref 是分支名,不指定会拿分支名当 tag;
+      # 指定后自动在当前 commit 建 v<版本> tag 并挂 Release(已存在则更新)
       - name: 发布 GitHub Release
         uses: softprops/action-gh-release@v2
         with:
+          tag_name: v${{ env.VERSION }}
           files: dist/*
           generate_release_notes: true

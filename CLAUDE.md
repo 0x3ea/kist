@@ -31,7 +31,7 @@ build/bin/kistctl <子命令>          # 正式模式
 ## CI/CD(.github/workflows)
 
 - `ci.yml`:每次分支 push 自动跑 `make check`( ubuntu runner 需先 `npm ci && npm run build` 产出 `frontend/dist`——go:embed 需要;装 libgtk-3-dev/libwebkit2gtk-4.1-dev,xvfb 套壳保险)。tags 推送不触发(branches `**` 只匹配分支)。
-- `release.yml`:推 `v*` 标签触发——发布前先全量测试,然后产出 Linux/Windows 各 GUI+CLI 四个裸二进制(命名沿用 quickstart:`kistctl-<版本>-<os>-<arch>`,版本由 tag 去 v 前缀经 -ldflags 注入)+ checksums.txt,发 GitHub Release。wails CLI 钉 v2.15.0(与 go.mod 同源)。
+- `release.yml`:推 `v*` 标签触发,也可 Actions 页手动触发(不提交 tag;版本号输入 > 当前 tag > 最近 tag > 0.0.0-短SHA,产物挂 v<版本> Release,不存在则建)——发布前先全量测试,然后产出 Linux/Windows 各 GUI+CLI 四个裸二进制(命名沿用 quickstart:`kistctl-<版本>-<os>-<arch>`,版本经 -ldflags 注入)+ checksums.txt。wails CLI 钉 v2.15.0(与 go.mod 同源)。
 
 ## 代码与提交约定
 
