@@ -174,6 +174,42 @@ func (db *DB) SetLastBackupAt(unix int64) error {
 	return err
 }
 
+// LastSyncedRev 返回同步基线(TODO-09):上次同步(成功推送或采纳远端)后
+// 双方一致的 revision。push/pull 前用它做三方比较——revision 从"裁判"(比
+// 大小定输赢)变为"证人"(只回答谁动过),顺带治好平局盲区(两侧各写一次、
+// 计数相等也判得出分叉)。
+//
+// 键不存在时以当前 revision 初始化:全新库 rev=0 即零基线;升级库(无此键
+// 的既存用户)把"此刻"当共识,首读不产生假分叉。因此不能在 ensureSyncState
+// 里播种 0——那会把升级库的基线钉死在 0,下次同步必然误报。
+func (db *DB) LastSyncedRev() (uint64, error) {
+	var v string
+	err := db.QueryRow(`SELECT value FROM sync_state WHERE key = 'last_synced_rev'`).Scan(&v)
+	if err == sql.ErrNoRows {
+		rev, rerr := db.Revision()
+		if rerr != nil {
+			return 0, rerr
+		}
+		return rev, db.SetLastSyncedRev(rev)
+	}
+	if err != nil {
+		return 0, err
+	}
+	n, err := strconv.ParseUint(v, 10, 64)
+	if err != nil {
+		return 0, err
+	}
+	return n, nil
+}
+
+// SetLastSyncedRev 重写同步基线。直写而不经 WithTx(同 SetLastBackupAt:
+// 簿记不是内容变更,参与 revision 会自我触发)。
+func (db *DB) SetLastSyncedRev(rev uint64) error {
+	_, err := db.Exec(`INSERT OR REPLACE INTO sync_state (key, value) VALUES ('last_synced_rev', ?)`,
+		strconv.FormatUint(rev, 10))
+	return err
+}
+
 // SnapshotTo 生成一致性快照(VACUUM INTO),不必停写;产物是独立的完整库文件。
 func (db *DB) SnapshotTo(path string) error {
 	// VACUUM INTO 要求目标不存在

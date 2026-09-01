@@ -123,7 +123,7 @@ func TestBackupPullDualDevice(t *testing.T) {
 	revA, _ := dbA.Revision()
 	devA, _ := dbA.DeviceID()
 
-	info, err := BackupNow(ctx, mk, dbA, storeA)
+	info, err := BackupNow(ctx, mk, dbA, storeA, false)
 	if err != nil {
 		t.Fatalf("BackupNow: %v", err)
 	}
@@ -140,7 +140,7 @@ func TestBackupPullDualDevice(t *testing.T) {
 	if err := os.WriteFile(config.KeyFilePath(), kfb, 0o600); err != nil {
 		t.Fatal(err)
 	}
-	res, err := PullRemote(ctx, mk, storeB, dbB)
+	res, err := PullRemote(ctx, mk, storeB, dbB, false)
 	if err != nil {
 		t.Fatalf("PullRemote(B): %v", err)
 	}
@@ -166,10 +166,10 @@ func TestBackupPullDualDevice(t *testing.T) {
 
 	// ---- B 新增记录并备份 → A pull → replaced(双向同步)----
 	insertFile(t, dbB, "B 的新文件.txt", "", false)
-	if _, err := BackupNow(ctx, mk, dbB, storeB); err != nil {
+	if _, err := BackupNow(ctx, mk, dbB, storeB, false); err != nil {
 		t.Fatal(err)
 	}
-	res, err = PullRemote(ctx, mk, storeA, dbA)
+	res, err = PullRemote(ctx, mk, storeA, dbA, false)
 	if err != nil || res.Action != "replaced" {
 		t.Fatalf("A pull: %+v %v", res, err)
 	}
@@ -179,7 +179,7 @@ func TestBackupPullDualDevice(t *testing.T) {
 
 	// ---- A 本地改动未备份 → local-newer,本地不动 ----
 	insertFile(t, dbA, "A 未推送.txt", "", false)
-	res, err = PullRemote(ctx, mk, storeA, dbA)
+	res, err = PullRemote(ctx, mk, storeA, dbA, false)
 	if err != nil || res.Action != "local-newer" {
 		t.Fatalf("A 二次 pull: %+v %v", res, err)
 	}
@@ -188,11 +188,11 @@ func TestBackupPullDualDevice(t *testing.T) {
 	}
 
 	// ---- noop:已同步到同一 revision ----
-	if _, err := BackupNow(ctx, mk, dbA, storeA); err != nil {
+	if _, err := BackupNow(ctx, mk, dbA, storeA, false); err != nil {
 		t.Fatal(err)
 	}
 	// 注:BackupNow 只更新 last_backup_at(不走 WithTx),revision 不变
-	res, err = PullRemote(ctx, mk, storeB, dbB)
+	res, err = PullRemote(ctx, mk, storeB, dbB, false)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -213,13 +213,13 @@ func TestPullWrongKey(t *testing.T) {
 	_, storeA, dbA := setupDevice(t, srv.URL)
 	mk := createAccount(t, storeA)
 	insertFile(t, dbA, "机密.txt", "", false)
-	if _, err := BackupNow(ctx, mk, dbA, storeA); err != nil {
+	if _, err := BackupNow(ctx, mk, dbA, storeA, false); err != nil {
 		t.Fatal(err)
 	}
 
 	_, storeB, dbB := setupDevice(t, srv.URL)
 	wrongMK, _ := crypto.GenerateMasterKey()
-	if _, err := PullRemote(ctx, wrongMK, storeB, dbB); !errors.Is(err, crypto.ErrWrongKey) {
+	if _, err := PullRemote(ctx, wrongMK, storeB, dbB, false); !errors.Is(err, crypto.ErrWrongKey) {
 		t.Fatalf("期望 ErrWrongKey,得到 %v", err)
 	}
 }
@@ -229,7 +229,7 @@ func TestPullNoBackup(t *testing.T) {
 	ctx := context.Background()
 	_, storeA, dbA := setupDevice(t, srv.URL)
 	mk := createAccount(t, storeA)
-	if _, err := PullRemote(ctx, mk, storeA, dbA); err == nil {
+	if _, err := PullRemote(ctx, mk, storeA, dbA, false); err == nil {
 		t.Fatal("从未备份过应报错")
 	}
 }
@@ -241,7 +241,7 @@ func TestPullCorruptBackup(t *testing.T) {
 	_, storeA, dbA := setupDevice(t, srv.URL)
 	mk := createAccount(t, storeA)
 	insertFile(t, dbA, "x.txt", "", false)
-	if _, err := BackupNow(ctx, mk, dbA, storeA); err != nil {
+	if _, err := BackupNow(ctx, mk, dbA, storeA, false); err != nil {
 		t.Fatal(err)
 	}
 
@@ -257,7 +257,7 @@ func TestPullCorruptBackup(t *testing.T) {
 	}
 
 	_, storeB, dbB := setupDevice(t, srv.URL)
-	if _, err := PullRemote(ctx, mk, storeB, dbB); err == nil {
+	if _, err := PullRemote(ctx, mk, storeB, dbB, false); err == nil {
 		t.Fatal("损坏的备份必须被拒绝")
 	}
 }
@@ -276,20 +276,20 @@ func TestBackupPullLogs(t *testing.T) {
 	_, storeA, dbA := setupDevice(t, srv.URL)
 	mk := createAccount(t, storeA)
 	insertFile(t, dbA, "a.txt", "", false)
-	if _, err := BackupNow(ctx, mk, dbA, storeA); err != nil {
+	if _, err := BackupNow(ctx, mk, dbA, storeA, false); err != nil {
 		t.Fatal(err)
 	}
 
 	_, storeB, dbB := setupDevice(t, srv.URL)
-	if _, err := PullRemote(ctx, mk, storeB, dbB); err != nil { // replaced
+	if _, err := PullRemote(ctx, mk, storeB, dbB, false); err != nil { // replaced
 		t.Fatal(err)
 	}
-	if _, err := PullRemote(ctx, mk, storeB, dbB); err != nil { // noop:同 revision
+	if _, err := PullRemote(ctx, mk, storeB, dbB, false); err != nil { // noop:同 revision
 		t.Fatal(err)
 	}
 
 	insertFile(t, dbA, "本地改动.txt", "", false)
-	if _, err := PullRemote(ctx, mk, storeA, dbA); err != nil { // local-newer
+	if _, err := PullRemote(ctx, mk, storeA, dbA, false); err != nil { // local-newer
 		t.Fatal(err)
 	}
 
@@ -322,12 +322,12 @@ func TestBackupCarriesUploadingState(t *testing.T) {
 	if err := dbA.SetFileState(hits[0].ID, "uploading"); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := BackupNow(ctx, mk, dbA, storeA); err != nil {
+	if _, err := BackupNow(ctx, mk, dbA, storeA, false); err != nil {
 		t.Fatal(err)
 	}
 
 	_, storeB, dbB := setupDevice(t, srv.URL)
-	if _, err := PullRemote(ctx, mk, storeB, dbB); err != nil {
+	if _, err := PullRemote(ctx, mk, storeB, dbB, false); err != nil {
 		t.Fatal(err)
 	}
 	hitsB, err := dbB.Search("待同步", 5)

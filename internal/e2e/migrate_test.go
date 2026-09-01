@@ -53,7 +53,7 @@ func TestMigrateEndToEnd(t *testing.T) {
 		t.Fatal(err)
 	}
 	allDone(t, waitIdle(t, e.m))
-	if _, err := backup.BackupNow(ctx, e.mk, e.db, e.store); err != nil {
+	if _, err := backup.BackupNow(ctx, e.mk, e.db, e.store, false); err != nil {
 		t.Fatal(err)
 	}
 
@@ -93,7 +93,7 @@ func TestMigrateEndToEnd(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { dbB.Close() })
-	pres, err := backup.PullRemote(ctx, e.mk, storeB, dbB)
+	pres, err := backup.PullRemote(ctx, e.mk, storeB, dbB, false)
 	if err != nil || pres.Action != "replaced" {
 		t.Fatalf("新端 pull: %+v %v", pres, err)
 	}
@@ -129,7 +129,7 @@ func TestMigrateResume(t *testing.T) {
 		t.Fatal(err)
 	}
 	allDone(t, waitIdle(t, e.m))
-	if _, err := backup.BackupNow(ctx, e.mk, e.db, e.store); err != nil {
+	if _, err := backup.BackupNow(ctx, e.mk, e.db, e.store, false); err != nil {
 		t.Fatal(err)
 	}
 

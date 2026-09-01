@@ -139,10 +139,10 @@ func TestE2EMetaMoveSummary(t *testing.T) {
 	}
 
 	// backup → pull 恢复:元数据随索引云备份存活
-	if _, err := backup.BackupNow(ctx, e.mk, e.db, e.store); err != nil {
+	if _, err := backup.BackupNow(ctx, e.mk, e.db, e.store, false); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := backup.PullRemote(ctx, e.mk, e.store, e.db); err != nil {
+	if _, err := backup.PullRemote(ctx, e.mk, e.store, e.db, false); err != nil {
 		t.Fatalf("恢复: %v", err)
 	}
 	m, err = e.db.GetFolderMeta(idA)

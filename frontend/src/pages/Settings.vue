@@ -6,6 +6,7 @@ import { onMounted, reactive, ref } from 'vue'
 import { config, main } from '../../wailsjs/go/models'
 import {
   store,
+  syncConflict,
   backupNow,
   changePassphrase,
   deleteDrive,
@@ -272,6 +273,13 @@ async function onChangePass() {
         <button @click="onSaveSettings">保存偏好</button>
       </div>
       <div class="divider" />
+      <!-- 同步分叉待裁决(TODO-09):对话框关掉后的重入入口 -->
+      <div v-if="syncConflict.pending" class="row conflict-row">
+        <span class="dim">
+          有待裁决的同步{{ syncConflict.kind === 'remote-ahead' ? '提示' : '冲突' }}(本机 {{ syncConflict.localRev }} / 远端 {{ syncConflict.remoteRev }})
+        </span>
+        <button class="primary" @click="syncConflict.open = true">处理</button>
+      </div>
       <div class="row">
         <button class="primary" @click="onBackup">立即备份索引</button>
         <span v-if="store.lastBackup" class="dim">
@@ -373,6 +381,13 @@ select {
   gap: 10px;
   align-items: center;
   flex-wrap: wrap;
+}
+
+/* 同步分叉待裁决横幅(TODO-09) */
+.conflict-row {
+  border: 1px solid var(--err);
+  border-radius: var(--radius);
+  padding: 10px;
 }
 
 .msg {

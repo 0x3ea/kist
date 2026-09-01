@@ -37,6 +37,7 @@ export function GetSettings():Promise<config.Settings>;
 export function GetWebDAVConfig():Promise<main.WebDAVConfig>;
 
 export function ImportFromRemote(arg1:string):Promise<backup.PullResult>;
+export function ResolveConflict(arg1:string,arg2:string):Promise<void>;
 
 export function ListDrives():Promise<Array<main.DriveInfo>>;
 

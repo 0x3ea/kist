@@ -11,6 +11,7 @@ import Transfers from './pages/Transfers.vue'
 import Settings from './pages/Settings.vue'
 import Toast from './components/Toast.vue'
 import ConfirmDialog from './components/ConfirmDialog.vue'
+import SyncConflictDialog from './components/SyncConflictDialog.vue'
 
 onMounted(() => {
   init()
@@ -72,6 +73,7 @@ const navItems = [
     </main>
     <Toast />
     <ConfirmDialog />
+    <SyncConflictDialog />
     <div v-if="store.busy" class="busy-overlay">{{ store.busy }}</div>
   </div>
 </template>

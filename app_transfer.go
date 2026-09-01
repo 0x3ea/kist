@@ -186,12 +186,18 @@ func (a *App) BackupIndexNow() (info backup.BackupInfo, err error) {
 	mk, _ := a.mkSnapshot()
 	ctx, cancel := context.WithTimeout(context.Background(), backupTimeout)
 	defer cancel()
-	info, err = backup.BackupNow(ctx, mk, a.db, store)
+	info, err = backup.BackupNow(ctx, mk, a.db, store, false)
 	if err != nil {
+		if c := conflictOf(err); c != nil {
+			a.recordConflict(c) // 弹对话框;错误同时走 toast(CONFLICT 码)
+			// toast 文案用 GUI 版短句,不带 CLI 的 flag 指引
+			return info, a.wrap(errs.New(errs.Conflict, conflictBrief(c)))
+		}
 		return info, a.wrap(err)
 	}
 	a.mu.Lock()
 	a.lastBackupRev = info.Revision
+	a.syncConflict = nil // 成功同步 = 旧分叉已过时
 	a.mu.Unlock()
 	a.emitNotify("info", fmt.Sprintf("索引已备份(revision %d,%s)",
 		info.Revision, info.At.Format("2006-01-02 15:04")))

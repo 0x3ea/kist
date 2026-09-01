@@ -10,6 +10,7 @@ const CODE_TEXT: Record<string, string> = {
   NOT_FOUND: '未找到目标',
   CORRUPT: '数据损坏或密钥不符',
   LOCKED: '尚未解锁',
+  CONFLICT: '同步冲突,需要裁决保留哪一方',
   INTERNAL: '内部错误',
 }
 

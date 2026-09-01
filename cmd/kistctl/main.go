@@ -10,6 +10,7 @@ import (
 	"bufio"
 	"context"
 	"database/sql"
+	"errors"
 	"flag"
 	"fmt"
 	"os"
@@ -59,8 +60,8 @@ const usageText = `用法:kistctl <子命令> [参数]
   note    <id> [--set 文本]              查看/设置备注
   rm      <id...>                        软删除文件
   gc      [--dry-run]                    清理 trash blob、报告孤儿
-  backup  --pass-stdin                   加密备份索引到远端 index.enc
-  pull    --pass-stdin                   从远端恢复索引(新设备/多设备同步)
+  backup  [--force] --pass-stdin         加密备份索引到远端 index.enc(分叉时 --force=保留本机)
+  pull    [--force] --pass-stdin         从远端恢复索引(分叉时 --force=保留云端;新设备/多设备同步)
   migrate --url <新URL> --user <用户名> [--pass-stdin] [--root /kist] [--switch]  网盘间纯密文迁移(断点续搬,不解锁)
   version                               显示版本`
 
@@ -1749,6 +1750,7 @@ func cmdCoversMigrate(args []string) error {
 
 func cmdBackup(args []string) error {
 	fs := flag.NewFlagSet("backup", flag.ContinueOnError)
+	force := fs.Bool("force", false, "同步分叉时仍推送(分叉裁决:保留本机,覆盖远端)")
 	passStdin := passStdinFlag(fs)
 	if err := parseArgs(fs, args); err != nil {
 		return err
@@ -1770,9 +1772,9 @@ func cmdBackup(args []string) error {
 		return err
 	}
 	defer db.Close()
-	info, err := backup.BackupNow(context.Background(), mk, db, store)
+	info, err := backup.BackupNow(context.Background(), mk, db, store, *force)
 	if err != nil {
-		return errs.From(err)
+		return conflictErr(err)
 	}
 	audit.Set(map[string]any{"revision": info.Revision, "bytes": info.Size})
 	fmt.Printf("备份完成:revision %d,加密后 %d 字节,%s\n",
@@ -1780,8 +1782,22 @@ func cmdBackup(args []string) error {
 	return nil
 }
 
+// conflictErr 把同步检测拦下的 *Conflict 转成 CONFLICT 码的 AppError
+// (GUI 按码映射文案,audit 记错误码),并登记三方 revision 供取证。
+func conflictErr(err error) error {
+	var c *backup.Conflict
+	if !errors.As(err, &c) {
+		return errs.From(err)
+	}
+	audit.Set(map[string]any{
+		"conflict": c.Kind, "local_rev": c.LocalRev, "remote_rev": c.RemoteRev, "baseline": c.BaselineRev,
+	})
+	return errs.Wrap(errs.Conflict, err)
+}
+
 func cmdPull(args []string) error {
 	fs := flag.NewFlagSet("pull", flag.ContinueOnError)
+	force := fs.Bool("force", false, "同步分叉时仍采纳远端(分叉裁决:保留云端,本地改动归档)")
 	passStdin := passStdinFlag(fs)
 	if err := parseArgs(fs, args); err != nil {
 		return err
@@ -1804,15 +1820,22 @@ func cmdPull(args []string) error {
 		return err
 	}
 	defer db.Close()
-	res, err := backup.PullRemote(context.Background(), mk, store, db)
+	res, err := backup.PullRemote(context.Background(), mk, store, db, *force)
 	if err != nil {
-		return errs.From(err)
+		return conflictErr(err)
 	}
-	audit.Set(map[string]any{"action": res.Action, "remote_rev": res.RemoteRev, "local_rev": res.LocalRev})
+	audit.Set(map[string]any{
+		"action": res.Action, "remote_rev": res.RemoteRev, "local_rev": res.LocalRev, "forked": res.Forked,
+	})
 	switch res.Action {
 	case "replaced":
-		fmt.Printf("已从远端恢复索引(远端 revision %d > 本地 %d,来自设备 %s);旧库已归档在 backups/ 目录\n",
-			res.RemoteRev, res.LocalRev, res.RemoteDevice)
+		if res.Forked {
+			fmt.Printf("分叉裁决:已采纳远端(revision %d,来自设备 %s);本机改动(revision %d)已归档 backups/\n",
+				res.RemoteRev, res.RemoteDevice, res.LocalRev)
+		} else {
+			fmt.Printf("已从远端恢复索引(远端 revision %d > 本地 %d,来自设备 %s);旧库已归档在 backups/ 目录\n",
+				res.RemoteRev, res.LocalRev, res.RemoteDevice)
+		}
 	case "noop":
 		fmt.Printf("本地与远端同版本(revision %d),无需恢复\n", res.LocalRev)
 	case "local-newer":

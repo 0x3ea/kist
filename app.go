@@ -52,9 +52,10 @@ type App struct {
 	db  *index.DB         // startup 打开(新机器得到空库),shutdown 关闭
 	mgr *transfer.Manager // startup 构造;MK 闭包读解锁态,Lock 后任务以 LOCKED 失败
 
-	backupTimer   *time.Timer // index:changed 防抖定时器(time.AfterFunc 重置法)
-	lastBackupRev uint64      // 会话内最近一次成功备份的 revision(基线 = 解锁时)
-	backingUp     atomic.Bool // 备份互斥(防抖/手动/退出并发)
+	backupTimer   *time.Timer      // index:changed 防抖定时器(time.AfterFunc 重置法)
+	lastBackupRev uint64           // 会话内最近一次成功备份的 revision(基线 = 解锁时)
+	backingUp     atomic.Bool      // 备份互斥(防抖/手动/退出并发)
+	syncConflict  *backup.Conflict // 待裁决的同步分叉(TODO-09);nil = 无
 }
 
 // NewApp 创建 GUI 壳实例;装配发生在 startup(此时才有 Wails ctx)。
@@ -102,8 +103,20 @@ func (a *App) shutdown(ctx context.Context) {
 			// 窗口正在关闭,弹提示无意义。
 			bctx, cancel := context.WithTimeout(context.Background(), backupTimeout)
 			if mk, ok := a.mkSnapshot(); ok {
-				if _, err := backup.BackupNow(bctx, mk, a.db, a.storeSnapshot()); err != nil {
-					slog.Error("退出前索引备份失败", "err", err)
+				if _, err := backup.BackupNow(bctx, mk, a.db, a.storeSnapshot(), false); err != nil {
+					if c := conflictOf(err); c != nil {
+						// 分叉不强行推:窗口将关,裁决留给下次会话(下次备份重新检出)
+						a.mu.Lock()
+						a.syncConflict = c
+						a.mu.Unlock()
+						slog.Warn("退出前备份遇同步分叉,未推送", "local", c.LocalRev, "remote", c.RemoteRev)
+					} else {
+						slog.Error("退出前索引备份失败", "err", err)
+					}
+				} else {
+					a.mu.Lock()
+					a.syncConflict = nil
+					a.mu.Unlock()
 				}
 			}
 			cancel()
@@ -451,6 +464,7 @@ func (a *App) scheduleAutoBackup() {
 }
 
 // runAutoBackup 执行一次自动备份;正在备份时重排定时器(备份期间到达的变更不丢)。
+// 有待裁决的同步分叉时静默让路(TODO-09:不打断用户,也不反复弹窗)。
 // 用独立 Background 超时 ctx 而非 a.ctx:退出序列里 a.ctx 可能已取消而备份仍应完成。
 func (a *App) runAutoBackup() {
 	if !a.backingUp.CompareAndSwap(false, true) {
@@ -458,6 +472,12 @@ func (a *App) runAutoBackup() {
 		return
 	}
 	defer a.backingUp.Store(false)
+	a.mu.Lock()
+	pending := a.syncConflict != nil
+	a.mu.Unlock()
+	if pending {
+		return
+	}
 	mk, ok := a.mkSnapshot()
 	if !ok {
 		return
@@ -468,16 +488,54 @@ func (a *App) runAutoBackup() {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), backupTimeout)
 	defer cancel()
-	info, err := backup.BackupNow(ctx, mk, a.db, store)
+	info, err := backup.BackupNow(ctx, mk, a.db, store, false)
 	if err != nil {
+		if c := conflictOf(err); c != nil {
+			a.recordConflict(c)
+			return
+		}
 		slog.Warn("自动备份失败", "err", err)
 		a.emitNotify("error", "自动备份失败:"+err.Error())
 		return
 	}
 	a.mu.Lock()
 	a.lastBackupRev = info.Revision
+	a.syncConflict = nil // 成功同步 = 旧分叉已过时
 	a.mu.Unlock()
 	a.emitNotify("info", fmt.Sprintf("索引已自动备份(revision %d)", info.Revision))
+}
+
+// conflictOf 从错误链里取同步分叉(*Conflict);非冲突错误返回 nil。
+func conflictOf(err error) *backup.Conflict {
+	var c *backup.Conflict
+	if errors.As(err, &c) {
+		return c
+	}
+	return nil
+}
+
+// recordConflict 登记待裁决的同步分叉:置挂起位、发 sync:conflict 事件
+// (前端弹对话框)并 toast。重启后挂起位丢失,冲突会在下次备份尝试时重新
+// 检出——自愈,无需持久化。
+func (a *App) recordConflict(c *backup.Conflict) {
+	a.mu.Lock()
+	a.syncConflict = c
+	a.mu.Unlock()
+	if a.ctx != nil {
+		wruntime.EventsEmit(a.ctx, "sync:conflict", map[string]any{
+			"kind": c.Kind, "localRev": c.LocalRev, "remoteRev": c.RemoteRev,
+			"baselineRev": c.BaselineRev, "remoteDevice": c.RemoteDevice,
+		})
+	}
+	a.emitNotify("error", conflictBrief(c))
+}
+
+// conflictBrief 分叉的短文案(toast 用;完整裁决指引在对话框里)。
+func conflictBrief(c *backup.Conflict) string {
+	if c.Kind == backup.KindRemoteAhead {
+		return fmt.Sprintf("远端索引较新(revision %d),本机无未同步改动,从远端恢复即可", c.RemoteRev)
+	}
+	return fmt.Sprintf("本机(revision %d)与远端(revision %d)都有改动,需要裁决保留哪一方", c.LocalRev, c.RemoteRev)
 }
 
 // ---- 状态/配置/解锁 绑定 ----
@@ -752,8 +810,9 @@ func (a *App) SetActiveDrive(id string) (err error) {
 	if snapUnlocked && snapDB != nil && snapStore != nil {
 		if rev, rerr := snapDB.Revision(); rerr == nil && rev > snapRev {
 			bctx, cancel := context.WithTimeout(context.Background(), backupTimeout)
-			if _, berr := backup.BackupNow(bctx, snapMK, snapDB, snapStore); berr != nil {
+			if _, berr := backup.BackupNow(bctx, snapMK, snapDB, snapStore, false); berr != nil {
 				// 备份失败不拦切换:本地库文件还在,数据不丢,只是远端备份落后
+				// (分叉同样不拦:旧库归档语义下,切过去之后远端状态再行裁决)
 				slog.Warn("切换前备份失败(继续切换)", "err", berr)
 			}
 			cancel()
@@ -903,8 +962,9 @@ func (a *App) Unlock(passphrase string) (r UnlockResult, err error) {
 	return r, nil
 }
 
-// ImportFromRemote 新设备恢复:keyfile 拉取 + 解锁 + 索引 LWW 拉取替换。
-// PullResult.Action ∈ replaced|noop|local-newer,三分支文案由前端呈现。
+// ImportFromRemote 新设备恢复:keyfile 拉取 + 解锁 + 三方比较拉取替换。
+// PullResult.Action ∈ replaced|noop|local-newer,分支文案由前端呈现;
+// 分叉(CONFLICT)在这里原样上抛——恢复入口不做裁决,裁决走 ResolveConflict。
 func (a *App) ImportFromRemote(passphrase string) (r backup.PullResult, err error) {
 	defer a.panicGuard(&err)
 	store, err := a.requireStore()
@@ -916,14 +976,74 @@ func (a *App) ImportFromRemote(passphrase string) (r backup.PullResult, err erro
 		return r, a.wrap(err)
 	}
 	a.setUnlocked(mk)
-	r, err = backup.PullRemote(a.callCtx(), mk, store, a.db)
+	r, err = backup.PullRemote(a.callCtx(), mk, store, a.db, false)
 	if err != nil {
+		if c := conflictOf(err); c != nil { // errs.From 不识 *Conflict,显式给 CONFLICT 码
+			return r, a.wrap(errs.New(errs.Conflict, conflictBrief(c)))
+		}
 		return r, a.wrap(err)
 	}
 	a.setUnlocked(mk) // 库可能被 ReplaceWith 换掉,基线重设
+	a.mu.Lock()
+	a.syncConflict = nil // 成功同步 = 旧分叉已过时
+	a.mu.Unlock()
 	a.emitState()
 	a.emitIndexChanged("pull")
 	return r, nil
+}
+
+// ResolveConflict 同步分叉裁决(TODO-09):action ∈ keep-local | keep-remote。
+//   - keep-local:强制推送本机,覆盖远端(不动本地,无需口令——已解锁)
+//   - keep-remote:强制采纳远端,本机改动经 ReplaceWith 归档 backups/(复核口令)
+//
+// 两条路的基线推进都在 backup 包内部完成;成功后清挂起位。
+func (a *App) ResolveConflict(action, passphrase string) (err error) {
+	defer a.panicGuard(&err)
+	store, err := a.requireStore()
+	if err != nil {
+		return a.wrap(err)
+	}
+	switch action {
+	case "keep-local":
+		if err := a.requireUnlocked(); err != nil {
+			return a.wrap(err)
+		}
+		if _, err := a.requireDB(); err != nil {
+			return a.wrap(err)
+		}
+		mk, _ := a.mkSnapshot()
+		ctx, cancel := context.WithTimeout(context.Background(), backupTimeout)
+		defer cancel()
+		info, err := backup.BackupNow(ctx, mk, a.db, store, true)
+		if err != nil {
+			return a.wrap(err)
+		}
+		a.mu.Lock()
+		a.lastBackupRev = info.Revision
+		a.syncConflict = nil
+		a.mu.Unlock()
+		a.emitNotify("info", fmt.Sprintf("已保留本机并覆盖远端(revision %d)", info.Revision))
+		return nil
+	case "keep-remote":
+		mk, _, err := a.unlockKeyFile(store, passphrase)
+		if err != nil {
+			return a.wrap(err) // 口令复核失败 → AUTH_FAILED
+		}
+		r, err := backup.PullRemote(a.callCtx(), mk, store, a.db, true)
+		if err != nil {
+			return a.wrap(err)
+		}
+		a.setUnlocked(mk)
+		a.mu.Lock()
+		a.syncConflict = nil
+		a.mu.Unlock()
+		a.emitState()
+		a.emitIndexChanged("pull")
+		a.emitNotify("info", fmt.Sprintf("已采纳远端(revision %d),本机改动已归档 backups/", r.RemoteRev))
+		return nil
+	default:
+		return a.wrap(errs.New(errs.BadConfig, "未知裁决动作 "+action+"(可用:keep-local|keep-remote)"))
+	}
 }
 
 // Lock 锁定:MK 擦除清零,停防抖定时器;db/mgr 保留(Lock 页仍可看文件数)。

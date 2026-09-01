@@ -17,6 +17,7 @@ const (
 	Corrupt       = "CORRUPT"        // 数据/密钥文件损坏或密钥不符
 	Locked        = "LOCKED"         // 未解锁就发起传输
 	Busy          = "BUSY"           // 有传输进行中,操作暂不可用(如切换网盘,TODO-21)
+	Conflict      = "CONFLICT"       // 同步分叉:本机与远端在基线后都有改动(TODO-09)
 	Internal      = "INTERNAL"       // 其余内部错误
 )
 

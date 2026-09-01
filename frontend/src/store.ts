@@ -57,6 +57,23 @@ export function settleConfirm(ok: boolean) {
   confirmState.resolve = null
 }
 
+/** 同步分叉待裁决(TODO-09):Go 侧 sync:conflict 事件驱动。
+ * pending = 冲突存在未裁决(Settings 横幅据此显示);open = 对话框可见。 */
+export const syncConflict = reactive<{
+  pending: boolean
+  open: boolean
+  kind: string // diverged | remote-ahead
+  localRev: number
+  remoteRev: number
+  baselineRev: number
+  remoteDevice: string
+}>({ pending: false, open: false, kind: '', localRev: 0, remoteRev: 0, baselineRev: 0, remoteDevice: '' })
+
+/** 关掉对话框但保留冲突横幅入口("稍后处理") */
+export function dismissConflict() {
+  syncConflict.open = false
+}
+
 export const store = reactive({
   /** 后端 app:state 快照(startup 事件早于订阅会丢,init 主动拉) */
   state: { Configured: false, Unlocked: false, FileCount: 0, HasLocalKeyfile: false, DriveName: '', DriveCount: 0 },
@@ -154,6 +171,37 @@ export async function init() {
     refreshDrives()
   })
   EventsOn('notify', (n) => toast(n?.level === 'error' ? 'error' : 'info', n?.text ?? ''))
+  EventsOn('sync:conflict', (c) => {
+    // 同步分叉待裁决(TODO-09):自动/手动备份被拦下时后端发出
+    Object.assign(syncConflict, {
+      pending: true,
+      open: true,
+      kind: c?.kind ?? 'diverged',
+      localRev: c?.localRev ?? 0,
+      remoteRev: c?.remoteRev ?? 0,
+      baselineRev: c?.baselineRev ?? 0,
+      remoteDevice: c?.remoteDevice ?? '',
+    })
+  })
+}
+
+/** 分叉裁决(TODO-09):keep-local = 覆盖远端;keep-remote = 采纳远端(本机归档) */
+export async function resolveConflict(action: 'keep-local' | 'keep-remote'): Promise<boolean> {
+  const done = setBusy('处理同步冲突…')
+  try {
+    // keep-remote 需复核口令(与 Lock 页"从远端恢复索引"同款 prompt)
+    const pass = action === 'keep-remote' ? (prompt('请输入口令以采纳远端索引') ?? '') : ''
+    if (action === 'keep-remote' && !pass) return false
+    await API.ResolveConflict(action, pass)
+    syncConflict.pending = false
+    syncConflict.open = false
+    return true
+  } catch (e) {
+    fail(e)
+    return false
+  } finally {
+    done()
+  }
 }
 
 export async function refreshState() {

@@ -164,19 +164,20 @@ CREATE TABLE blobs (
 
 CREATE TABLE sync_state (key TEXT PRIMARY KEY, value TEXT NOT NULL);
 -- 初始行: schema_version, revision(=0), device_id(8B hex), last_backup_at
+-- TODO-09 增: last_synced_rev(首读时以当前 revision 初始化,不在建表时播种)
 ```
 
 - `PRAGMA journal_mode=WAL; foreign_keys=ON; busy_timeout=5000; user_version=1`(按版本迁移)。
-- **revision**:每个写事务内 +1,单调计数器,LWW 依据(不信任时钟)。
+- **revision**:每个写事务内 +1,单调计数器。TODO-09 起角色从 LWW 裁判(比大小定输赢)变为同步**证人**(与 last_synced_rev 基线三方比较,只回答"谁动过"),不信任时钟。
 - 软删除:查询一律 `WHERE deleted_at IS NULL`;搜索用 `name/note LIKE '%q%'`(FTS5 留作增强)。
 - 用户自定义数据:加密时间/备注存于索引库,随加密备份同步;`user_meta` 为 JSON 扩展位。封面(TODO-10 起不持字节):索引只存 `covers` 轻引用,字节走独立 blob(一封面一 blob,随机名入 `/kist/covers/`);自动封面随上传事务写引用、不额外计 revision,用户封面计 revision(与 SetNote 同级);存量缩略图经 `kistctl covers migrate` 一次性出库。
 - `SnapshotTo(path)` = `VACUUM INTO`(一致性快照);`ReplaceWith(path)` = 关库→旧库归档→tmp+rename 原子替换→重开。
 
 ### 索引云备份(internal/backup)
 
-- `BackupNow`:`SnapshotTo(tmp)` → blob 格式加密(填 mtime/revision/deviceID)→ PUT index.enc(备注/缩略图随库同步)。触发:变更后防抖 30s / 手动 / 退出前。
-- `PullRemote`:GET → 读 header 的 revision/deviceID 与本地比较:remote>local → 替换(旧库归档到 `backups/index-<rev>-<ts>.db`);相等 → noop;remote<local → 提示推送;device 不同互有领先 → LWW 取高者,败方归档,UI 明示。
-- 明确不做行级 merge:面向单用户、同时单写者;落后方改动归档保留而非合并。
+- `BackupNow`:`SnapshotTo(tmp)` → blob 格式加密(填 mtime/revision/deviceID)→ PUT index.enc(备注/缩略图随库同步)。触发:变更后防抖 30s / 手动 / 退出前。**TODO-09 起 push 前三方比较**(本地/基线 last_synced_rev/远端 header revision):只有本机动过才推;只有远端动过报 remote-ahead 指引先拉;双方都动过即分叉,拒绝静默覆盖,人裁决(保留本机 = `--force` 推;保留云端 = `pull --force`,本机归档)。远端头部截断(CorruptBlob)放行自愈;钥匙不符(WrongKey,含头部翻转的不可区分形态)拒绝,守住跨账户。
+- `PullRemote`:GET → 读 header 的 revision,与本地 revision、基线三方比较:本机未动+远端动过 → 快进替换(旧库归档 `backups/index-<rev>-<ts>.db`);双方未动 → noop;只有本机动过 → 提示推送;双方都动过 → 分叉拒绝(force 采纳远端,`Forked=true`)。替换后基线重写为远端 revision(快照带着的是对方的基线)。
+- 明确不做行级 merge:面向单用户、同时单写者;冲突败方归档保留而非合并。已知边界:force 推送后若其他设备 revision 计数恰好相同且无新改动,其 pull 会 noop(计数证人无法区分同数内容),任一侧下一次写操作即触发分叉检出。
 
 ## 传输管线(internal/transfer)
 

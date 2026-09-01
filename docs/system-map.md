@@ -16,7 +16,7 @@ cmd/kistctl(CLI 壳,1440 行)        main.go+app*.go(Wails GUI 壳,Phase 7:31 �
           transfer.Manager        上传/下载/push 管线:单调度器 + 动态并发(1–4),
           (internal/transfer)     进度/取消/临时文件/文件夹打包/出站箱/gc
              │        │
-             │        └────────► internal/backup   索引云备份/恢复(LWW)
+             │        └────────► internal/backup   索引云备份/恢复(基线三方比较,TODO-09)
              │                    internal/migrate  网盘间纯密文迁移
              ▼
    ┌─────────────────┬──────────────────┬────────────────────┐
@@ -46,7 +46,7 @@ cmd/kistctl(CLI 壳,1440 行)        main.go+app*.go(Wails GUI 壳,Phase 7:31 �
 | index | ~1900 | SQLite 明文索引:虚拟目录、文件账本、目录/文件元数据 tag(TODO-16/17)、子树聚合、封面轻引用(TODO-10)、blob 登记、revision、快照/替换/库文件迁移 | `db.go`(打开/WithTx/快照/替换/MigrateIndexFile)、`schema.go`(迁移)、`files.go`、`folders.go`、`summary.go`(聚合+封面三级链)、`covers.go`、`blobs.go`、`outbox.go`、`thumbnails.go`(legacy 只读) |
 | crypto | 754 | 加密核心:口令→MK 包装(keyfile)、流式分块加解密(blob)、v2 大小量化 | `blob.go`(Writer/Reader)、`keyfile.go`、`format.go`(常量与档位)、`keys.go`(HKDF) |
 | dav | 542 | WebDAV 语义 + 网络可靠性:定长 PUT、流式 GET、O(1) Probe、重试退避 | `client.go`、`retry.go` |
-| backup | 209 | 索引云备份与多设备恢复,LWW | `backup.go` |
+| backup | ~330 | 索引云备份与多设备恢复:push/pull 前三方比较(本地/基线/远端 header),分叉拒绝静默覆盖交人裁决(TODO-09) | `backup.go` |
 | migrate | 188 | 网盘间纯密文搬运:断点续搬、双端校验 | `migrate.go` |
 | remote | ~230 | 远端对象语义:名字→路径、保留名、主/封面两命名空间的 blob 增删查 | `store.go` |
 | config | 276 | KIST_HOME 路径、config.json(schema v2:drives[]+active 多盘档案,旧格式自动迁移)、盘 ID/查重、设置归一化 | `config.go` |
@@ -158,7 +158,7 @@ GUI 是纯壳:**零业务逻辑,只编排 internal/***。与 CLI 的关系是同
 
 **Transfer.Phase**(一次传输的生命周期):`queued → encrypting → uploading → done`;下载 `queued → downloading → decrypting → done`;出站箱分支终态 `deferred`;异常 `error | canceled`。
 
-**sync_state**:`revision`(单调,LWW 判据)、`device_id`(8B hex,生成后永不变)、`last_backup_at`(**有意不进 revision**——否则备份本身会推高版本造成循环)。
+**sync_state**:`revision`(单调;TODO-09 起是同步证人而非裁判)、`device_id`(8B hex,生成后永不变;经 ReplaceWith 迁移会换成对方的,仅参考)、`last_backup_at` 与 `last_synced_rev`(TODO-09 同步基线;**均有意不进 revision**——簿记不是内容变更,否则自我触发循环/备份放大)。
 
 ## 8. 核心不变量(改代码前默诵)
 
@@ -175,7 +175,7 @@ GUI 是纯壳:**零业务逻辑,只编排 internal/***。与 CLI 的关系是同
 
 7. 索引是目录结构唯一真源;远端两命名空间(TODO-10):`/kist/` 主命名空间扁平,`/kist/covers/` 封面子命名空间,均零明文元数据。
 8. files + covers + blobs + revision+1 **同一事务**(TODO-10):索引有记录 ⟺ blobs 有登记;PUT 成功而索引失败只可能留下孤儿 blob(文件与封面同命运,gc 报告,**不自动删**);反向不成立——"索引有而远端无"只能以 uploading/missing 状态显式表达,不会静默。自动封面引用随上传事务写,不额外计 revision;用户封面(ImportCover)计 revision(与 SetNote 同级);迁移回填逐行 raw 事务不计 revision,结束一次 +1。
-9. revision 只经 `WithTx` 单调 +1,是 LWW 唯一判据,不信任系统时钟。
+9. revision 只经 `WithTx` 单调 +1,不信任系统时钟;同步裁决不用它比大小,而是与 `last_synced_rev` 基线三方比较(TODO-09)——平局(计数相等)也判得出分叉。
 10. 软删是默认删除语义;`DiscardPending` 只能动 uploading 行,**ready 文件必须走 rm**,不能无声消失。
 11. pull 替换本地库前必须完整解密验证(块认证+SHA 全过);被替换的库必归档 backups/。
 12. push 与 migrate 是**纯密文搬运**:不解锁、不触碰明文,不需要口令。
