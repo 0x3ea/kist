@@ -141,8 +141,11 @@ async function onRecover() {
           <button class="primary" @click="onSaveDav">测试连接并保存</button>
         </template>
         <template v-else>
-          <h2>设置加密口令</h2>
-          <p class="hint">口令用于加密所有文件;忘记口令 = 数据无法恢复,请牢记。</p>
+          <h2>创建账户 · 设置主口令</h2>
+          <p class="hint">
+            主口令属于整个账户,用于加密所有文件;之后添加的其他网盘都共用它。
+            忘记口令 = 数据无法恢复,请牢记。
+          </p>
           <label>口令<input v-model="pass1" type="password" @keyup.enter="onCreate" /></label>
           <label>再输入一次<input v-model="pass2" type="password" @keyup.enter="onCreate" /></label>
           <p v-if="testMsg" class="msg err">{{ testMsg }}</p>

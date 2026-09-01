@@ -458,6 +458,7 @@ func cmdInit(args []string) error {
 	db.Close()
 	mk.Wipe()
 	fmt.Printf("账户已建立:远端 %s/keyfile,本地索引 %s\n", cfgRootPath(), config.DriveIndexPath(activeDriveID()))
+	fmt.Println("口令属于整个账户:之后添加的其他网盘都共用它;忘记口令 = 数据无法恢复,请牢记")
 	return nil
 }
 
