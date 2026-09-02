@@ -534,18 +534,41 @@ export async function deleteEntries(): Promise<boolean> {
   }
 }
 
-export async function moveSelected(destPath: string): Promise<boolean> {
+export async function moveSelected(destID: number): Promise<boolean> {
   const files = [...store.selection]
   const folders = [...store.folderSelection]
   if (files.length === 0 && folders.length === 0) return false
   try {
-    const dest = await API.EnsureFolder(destPath)
-    await API.MoveEntries(files, folders, dest)
+    await API.MoveEntries(files, folders, destID)
     toast('info', `已移动 ${files.length} 个文件、${folders.length} 个目录`)
     return true
   } catch (e) {
     fail(e)
     return false
+  }
+}
+
+/** 目录选择器(MoveDialog)专用:只读列某目录的面包屑与子文件夹,
+ * 不碰全局 folder 状态(弹窗内浏览不能动 Files 页的导航位置)。 */
+export async function peekFolders(
+  id: number,
+): Promise<{ crumbs: index.Crumb[]; folders: index.Entry[] } | null> {
+  try {
+    const v = await API.ListFolder(id)
+    return { crumbs: v.Crumbs ?? [], folders: (v.Entries ?? []).filter((e) => e.IsFolder) }
+  } catch (e) {
+    fail(e)
+    return null
+  }
+}
+
+/** 目录选择器:在虚拟路径下建目录(EnsureFolder 幂等、多级宽容),返回 id */
+export async function ensureFolderAt(path: string): Promise<number | null> {
+  try {
+    return await API.EnsureFolder(path)
+  } catch (e) {
+    fail(e)
+    return null
   }
 }
 
