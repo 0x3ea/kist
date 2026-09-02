@@ -37,7 +37,6 @@ export function GetSettings():Promise<config.Settings>;
 export function GetWebDAVConfig():Promise<main.WebDAVConfig>;
 
 export function ImportFromRemote(arg1:string):Promise<backup.PullResult>;
-export function ResolveConflict(arg1:string,arg2:string):Promise<void>;
 
 export function ListDrives():Promise<Array<main.DriveInfo>>;
 
@@ -58,6 +57,8 @@ export function PreviewGC():Promise<main.GCReport>;
 export function RenameFile(arg1:number,arg2:string):Promise<void>;
 
 export function RenameFolder(arg1:number,arg2:string):Promise<void>;
+
+export function ResolveConflict(arg1:string,arg2:string):Promise<void>;
 
 export function RunGC():Promise<main.GCReport>;
 

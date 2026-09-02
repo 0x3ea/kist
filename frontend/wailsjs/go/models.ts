@@ -39,7 +39,9 @@ export namespace backup {
 	    Action: string;
 	    RemoteRev: number;
 	    LocalRev: number;
+	    BaselineRev: number;
 	    RemoteDevice: string;
+	    Forked: boolean;
 	
 	    static createFrom(source: any = {}) {
 	        return new PullResult(source);
@@ -50,7 +52,9 @@ export namespace backup {
 	        this.Action = source["Action"];
 	        this.RemoteRev = source["RemoteRev"];
 	        this.LocalRev = source["LocalRev"];
+	        this.BaselineRev = source["BaselineRev"];
 	        this.RemoteDevice = source["RemoteDevice"];
+	        this.Forked = source["Forked"];
 	    }
 	}
 

@@ -65,9 +65,6 @@ export function GetWebDAVConfig() {
 export function ImportFromRemote(arg1) {
   return window['go']['main']['App']['ImportFromRemote'](arg1);
 }
-export function ResolveConflict(arg1, arg2) {
-  return window['go']['main']['App']['ResolveConflict'](arg1, arg2);
-}
 
 export function ListDrives() {
   return window['go']['main']['App']['ListDrives']();
@@ -107,6 +104,10 @@ export function RenameFile(arg1, arg2) {
 
 export function RenameFolder(arg1, arg2) {
   return window['go']['main']['App']['RenameFolder'](arg1, arg2);
+}
+
+export function ResolveConflict(arg1, arg2) {
+  return window['go']['main']['App']['ResolveConflict'](arg1, arg2);
 }
 
 export function RunGC() {
