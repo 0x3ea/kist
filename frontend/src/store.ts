@@ -536,11 +536,12 @@ export async function deleteEntries(): Promise<boolean> {
 
 export async function moveSelected(destPath: string): Promise<boolean> {
   const files = [...store.selection]
-  if (files.length === 0) return false
+  const folders = [...store.folderSelection]
+  if (files.length === 0 && folders.length === 0) return false
   try {
     const dest = await API.EnsureFolder(destPath)
-    await API.MoveFiles(files, dest)
-    toast('info', `已移动 ${files.length} 个文件`)
+    await API.MoveEntries(files, folders, dest)
+    toast('info', `已移动 ${files.length} 个文件、${folders.length} 个目录`)
     return true
   } catch (e) {
     fail(e)

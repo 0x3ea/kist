@@ -197,6 +197,152 @@ func (db *DB) RenameFolder(folderID int64, name string) error {
 	})
 }
 
+// MoveEntries 把文件与目录一起移到 destFolderID(纯索引零流量):blob 名、
+// 目录 uuid 与虚拟路径无关,改挂点即可,子孙路径由查询侧派生自动跟随。
+// 单事务原子生效,全部成功才计一次 revision(与 UpdateFolderMeta 同洁癖)。
+// 目录侧语义:
+//   - 根不可移;不存在/已软删报错;
+//   - dest 在被移目录自身或其子树内 → 整批拒绝(改挂点会让目录成为自己的祖先);
+//   - 选区内祖先-后代同移 → 报错(两层都改挂会脱离原层级关系,应分批);
+//   - 已在 dest(目录原父即 dest / 文件现挂即 dest)→ 空转 no-op:不进事务
+//     就不计 revision(同 RenameFolder 空转语义),也避免把自己当撞名占用者;
+//   - 与 dest 下活跃目录撞名 → " (n)" 消解(批量搬迁语义,同文件 UniqueFileName;
+//     文件与目录同名可共存,nameTakenTx 只查 files,两套消解互不干扰)。
+//
+// 文件侧沿用 UniqueFileName 消解;modified_at 不动——移动不是内容变更。
+func (db *DB) MoveEntries(fileIDs, folderIDs []int64, destFolderID int64) error {
+	if len(fileIDs) == 0 && len(folderIDs) == 0 {
+		return nil
+	}
+	// 校验遍在事务外收齐全部问题再统一拒绝(planPackTree 同哲学);
+	// 目录全量载入与搜索侧 folderInfo 同款(个人规模下目录数很小)。
+	folders, err := db.loadFolderInfos()
+	if err != nil {
+		return err
+	}
+	destInfo, ok := folders[destFolderID]
+	if !ok || destInfo.deleted {
+		return fmt.Errorf("index: 目标目录 %d 不存在或已删除", destFolderID)
+	}
+	moving := make(map[int64]struct{}, len(folderIDs))
+	for _, id := range folderIDs {
+		if id == rootFolderID {
+			return fmt.Errorf("index: 根目录不可移动")
+		}
+		fi, ok := folders[id]
+		if !ok || fi.deleted {
+			return fmt.Errorf("index: 目录 %d 不存在或已删除", id)
+		}
+		moving[id] = struct{}{}
+	}
+	// 祖先-后代同移:沿每个被移目录上溯,命中另一被移目录即拒
+	for id := range moving {
+		for p := folders[id].parent; p.Valid; p = folders[p.Int64].parent {
+			if _, hit := moving[p.Int64]; hit {
+				return fmt.Errorf("index: 选区同时含祖先与后代目录,请分批移动")
+			}
+		}
+	}
+	// 环检测:沿 dest 上溯,命中任一被移目录即 dest 落在其子树内(或即自身)
+	for id := range moving {
+		for cur := destFolderID; ; {
+			if cur == id {
+				return fmt.Errorf("index: 目标目录在被移目录 %q 自身或其子树内", folders[id].name)
+			}
+			p := folders[cur].parent
+			if !p.Valid {
+				break
+			}
+			cur = p.Int64
+		}
+	}
+	// 空转过滤:已在 dest 的条目跳过;全为空转则不进事务(不计 revision)
+	var moveFolders []int64
+	for _, id := range folderIDs {
+		if p := folders[id].parent; p.Valid && p.Int64 == destFolderID {
+			continue
+		}
+		moveFolders = append(moveFolders, id)
+	}
+	var moveFiles []int64
+	for _, id := range fileIDs {
+		var fid int64
+		if err := db.QueryRow(
+			`SELECT folder_id FROM files WHERE id = ? AND deleted_at IS NULL`, id).Scan(&fid); err != nil {
+			return fmt.Errorf("index: 文件 %d 不存在或已删除: %w", id, err)
+		}
+		if fid == destFolderID {
+			continue
+		}
+		moveFiles = append(moveFiles, id)
+	}
+	if len(moveFolders) == 0 && len(moveFiles) == 0 {
+		return nil
+	}
+	return db.WithTx(func(tx *sql.Tx) error {
+		for _, id := range moveFolders {
+			newName, err := uniqueFolderNameTx(tx, destFolderID, folders[id].name)
+			if err != nil {
+				return err
+			}
+			if _, err := tx.Exec(
+				`UPDATE folders SET parent_id = ?, name = ? WHERE id = ?`, destFolderID, newName, id); err != nil {
+				return err
+			}
+		}
+		for _, id := range moveFiles {
+			var name string
+			if err := tx.QueryRow(
+				`SELECT name FROM files WHERE id = ?`, id).Scan(&name); err != nil {
+				return fmt.Errorf("index: 文件 %d: %w", id, err)
+			}
+			newName, err := db.UniqueFileName(tx, destFolderID, name)
+			if err != nil {
+				return err
+			}
+			if _, err := tx.Exec(
+				`UPDATE files SET folder_id = ?, name = ? WHERE id = ?`, destFolderID, newName, id); err != nil {
+				return err
+			}
+		}
+		return nil
+	})
+}
+
+// uniqueFolderNameTx 在 folderID 下给目录名找空位:与活跃目录撞名时追加
+// " (n)" 递增(目录无扩展名概念,不做 ext 拆分),上限同 UniqueFileName。
+// 只查 folders——文件与目录同名可共存,与文件侧消解互不干扰。
+func uniqueFolderNameTx(tx *sql.Tx, folderID int64, name string) (string, error) {
+	taken := func(name string) (bool, error) {
+		var one int
+		err := tx.QueryRow(
+			`SELECT 1 FROM folders WHERE parent_id = ? AND name = ? AND deleted_at IS NULL LIMIT 1`,
+			folderID, name).Scan(&one)
+		if err == sql.ErrNoRows {
+			return false, nil
+		}
+		if err != nil {
+			return false, err
+		}
+		return true, nil
+	}
+	ok, err := taken(name)
+	if err != nil || !ok {
+		return name, err
+	}
+	for i := 1; i <= 9999; i++ {
+		candidate := fmt.Sprintf("%s (%d)", name, i)
+		ok, err := taken(candidate)
+		if err != nil {
+			return "", err
+		}
+		if !ok {
+			return candidate, nil
+		}
+	}
+	return "", fmt.Errorf("index: 目录 %d 内 %q 的重名消解超出上限", folderID, name)
+}
+
 // SoftDeleteFolders 软删除目录(其下文件经查询侧过滤随之不可见)。
 func (db *DB) SoftDeleteFolders(ids []int64) error {
 	if len(ids) == 0 {

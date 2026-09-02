@@ -52,7 +52,7 @@ const usageText = `用法:kistctl <子命令> [参数]
   ls      [/路径]                        列虚拟目录(目录行附子树摘要:话数·大小·最近更新)
   search  <关键词>                       搜索文件名、备注、目录名与目录 tag
   meta    set <目录|文件> [--note 文本] [--tag a,b] [--cover <uuid|id|0>(仅目录)]  设置元数据(不带 flag 则显示当前值);meta list 列出全部
-  mv      <uuid|id...> <目标目录>        纯索引移动文件,零远端流量(归属给错时的便宜纠错)
+  mv      <路径|uuid|id...> <目标目录>    纯索引移动文件与目录,零远端流量(源:"/"开头为目录路径,其余文件 uuid|id;已在目标=空转)
   mkdir   /路径                          建虚拟目录(多级、幂等;纯索引零流量,先建目录再往里 put)
   rename  /路径 新名                     重命名目录(纯索引零流量;同名幂等,撞名报错)
   get     <uuid|id> --to <目录> [--keep-zip] --pass-stdin  下载解密(文件夹条目还原成目录;--keep-zip 落 zip)
@@ -1313,7 +1313,7 @@ func cmdMv(args []string) error {
 		return err
 	}
 	if fs.NArg() < 2 {
-		return errs.New(errs.BadConfig, "mv 需要 <uuid|id...> <目标目录>(最后一个参数是目标,从根写起)")
+		return errs.New(errs.BadConfig, "mv 需要 <路径|uuid|id...> <目标目录>(源可为目录路径;最后一个参数是目标,从根写起)")
 	}
 	db, err := openIndex()
 	if err != nil {
@@ -1334,30 +1334,67 @@ func cmdMv(args []string) error {
 	}); err != nil {
 		return errs.From(err)
 	}
-	var ids []int64
+	// 源分派与 rename 同款:"/" 开头是目录路径;其余先按文件 uuid|id,
+	// 失败回退按目录路径(裸名如 `mv 作品A /合集` 也能用)
+	var fileIDs, folderIDs []int64
 	for _, t := range targets {
-		f, err := resolveTarget(db, t)
+		fileID, folderID, err := resolveEntryTarget(db, t)
 		if err != nil {
 			return err
 		}
-		if f.DeletedAt.Valid {
-			return errs.New(errs.BadConfig, t+" 已删除,不可移动")
+		if folderID != 0 {
+			folderIDs = append(folderIDs, folderID)
+			continue
 		}
-		ids = append(ids, f.ID)
+		fileIDs = append(fileIDs, fileID)
 	}
-	if err := db.MoveFiles(ids, destID); err != nil {
+	if err := db.MoveEntries(fileIDs, folderIDs, destID); err != nil {
 		return errs.From(err)
 	}
-	audit.Set(map[string]any{"files": len(ids), "dest": fs.Args()[fs.NArg()-1]})
-	// 重名消解可能改了文件名,重取行打印实际落点
-	for _, id := range ids {
+	audit.Set(map[string]any{"files": len(fileIDs), "folders": len(folderIDs), "dest": fs.Args()[fs.NArg()-1]})
+	// 重名消解可能改了名字,重取行打印实际落点
+	for _, id := range fileIDs {
 		f, err := db.GetFile(id)
 		if err != nil {
 			return errs.From(err)
 		}
 		fmt.Printf("已移动 → %s\n", filePathOf(db, f))
 	}
+	for _, id := range folderIDs {
+		p, err := folderPathOf(db, id)
+		if err != nil {
+			return errs.From(err)
+		}
+		fmt.Printf("已移动 → %s\n", p)
+	}
 	return nil
+}
+
+// resolveEntryTarget 把 mv 源解析成文件或目录其一:"/" 开头按目录虚拟路径
+// (与 rename 的分派惯例一致);其余先按文件 uuid|id,失败回退按目录路径,
+// 裸名(如 `mv 作品A /合集`)也能用。返回 (fileID, folderID, err),
+// 命中的一方非 0。
+func resolveEntryTarget(db *index.DB, target string) (int64, int64, error) {
+	if !strings.HasPrefix(target, "/") {
+		if f, ferr := resolveTarget(db, target); ferr == nil {
+			if f.DeletedAt.Valid {
+				return 0, 0, errs.New(errs.BadConfig, target+" 已删除,不可移动")
+			}
+			return f.ID, 0, nil
+		}
+	}
+	segs, err := splitVirtualPath(target)
+	if err != nil {
+		return 0, 0, err
+	}
+	if len(segs) == 0 {
+		return 0, 0, errs.New(errs.BadConfig, "根目录不可移动")
+	}
+	id, err := db.ResolveFolderPath(segs)
+	if err != nil {
+		return 0, 0, errs.From(err)
+	}
+	return 0, id, nil
 }
 
 // resolveTarget 把 uuid 或数字 id 解析成索引行。
@@ -1514,6 +1551,25 @@ func filePathOf(db *index.DB, f index.FileRow) string {
 		b.WriteString(c.Name)
 	}
 	return b.String() + "/" + f.Name
+}
+
+func folderPathOf(db *index.DB, folderID int64) (string, error) {
+	crumb, err := db.FolderPath(folderID)
+	if err != nil {
+		return "", err
+	}
+	var b strings.Builder
+	for _, c := range crumb {
+		if c.Name == "" {
+			continue
+		}
+		b.WriteString("/")
+		b.WriteString(c.Name)
+	}
+	if b.Len() == 0 {
+		return "/", nil
+	}
+	return b.String(), nil
 }
 
 func orDash(s string, valid bool) string {

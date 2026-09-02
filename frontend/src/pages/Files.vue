@@ -135,9 +135,10 @@ const ctxItems = computed<CtxItem[]>(() => {
     },
     {
       label: '移动',
-      // MoveFiles 只支持文件;目录移动是 TODO-19 立项时明示的范围外
-      disabled: nFiles === 0,
-      title: nFiles === 0 ? '仅支持移动文件(目录移动尚未支持)' : '',
+      // MoveEntries 文件与目录同收(目录移动零流量,改挂点即可);
+      // 移进自身子树/祖先-后代同移由索引层拒绝,经 toast 报错
+      disabled: nFiles + nFolders === 0,
+      title: nFiles + nFolders === 0 ? '先选中要移动的条目' : '',
       action: () => (showMove.value = true),
     },
     {

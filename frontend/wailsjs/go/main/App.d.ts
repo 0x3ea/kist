@@ -44,7 +44,7 @@ export function ListFolder(arg1:number):Promise<main.FolderView>;
 
 export function Lock():Promise<void>;
 
-export function MoveFiles(arg1:Array<number>,arg2:number):Promise<void>;
+export function MoveEntries(arg1:Array<number>,arg2:Array<number>,arg3:number):Promise<void>;
 
 export function PickDir():Promise<string>;
 

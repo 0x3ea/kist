@@ -282,31 +282,10 @@ func (db *DB) scanFolderHits(rows *sql.Rows) ([]FolderHit, error) {
 	return hits, nil
 }
 
-// MoveFiles 把文件移动到目标目录(纯索引操作,零远端流量):
-// blob 名与虚拟路径无关,改挂点即可;重名经 UniqueFileName 消解。
-// modified_at 不动——移动不是内容变更,"最近更新"保持内容语义。
+// MoveFiles 把文件移动到目标目录(纯索引操作,零远端流量):MoveEntries
+// 的文件 only 薄包装(目录移动、环检测、空转 no-op 语义见 MoveEntries)。
 func (db *DB) MoveFiles(ids []int64, destFolderID int64) error {
-	if len(ids) == 0 {
-		return nil
-	}
-	return db.WithTx(func(tx *sql.Tx) error {
-		for _, id := range ids {
-			var name string
-			if err := tx.QueryRow(
-				`SELECT name FROM files WHERE id = ? AND deleted_at IS NULL`, id).Scan(&name); err != nil {
-				return fmt.Errorf("index: 文件 %d: %w", id, err)
-			}
-			newName, err := db.UniqueFileName(tx, destFolderID, name)
-			if err != nil {
-				return err
-			}
-			if _, err := tx.Exec(
-				`UPDATE files SET folder_id = ?, name = ? WHERE id = ?`, destFolderID, newName, id); err != nil {
-				return err
-			}
-		}
-		return nil
-	})
+	return db.MoveEntries(ids, nil, destFolderID)
 }
 
 // SetNote 设置/清空备注;经 WithTx,改动会计入 revision 并触发后续备份。

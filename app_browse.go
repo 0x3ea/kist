@@ -320,17 +320,18 @@ func (a *App) EnsureFolder(path string) (id int64, err error) {
 	return id, nil
 }
 
-// MoveFiles 纯索引移动文件(零远端流量,TODO-16);重名由索引层 "(1)" 消解。
-func (a *App) MoveFiles(fileIDs []int64, destFolderID int64) (err error) {
+// MoveEntries 纯索引移动文件与目录(零远端流量);重名由索引层 " (n)"
+// 消解,环/祖先-后代同移由索引层拒绝——语义细节见 index.MoveEntries。
+func (a *App) MoveEntries(fileIDs, folderIDs []int64, destFolderID int64) (err error) {
 	defer a.panicGuard(&err)
 	db, err := a.requireDB()
 	if err != nil {
 		return a.wrap(err)
 	}
-	if len(fileIDs) == 0 {
-		return a.wrap(errs.New(errs.BadConfig, "未选择任何文件"))
+	if len(fileIDs) == 0 && len(folderIDs) == 0 {
+		return a.wrap(errs.New(errs.BadConfig, "未选择任何条目"))
 	}
-	if err := db.MoveFiles(fileIDs, destFolderID); err != nil {
+	if err := db.MoveEntries(fileIDs, folderIDs, destFolderID); err != nil {
 		return a.wrap(errs.From(err))
 	}
 	a.emitIndexChanged("move")

@@ -70,7 +70,7 @@ GUI 是纯壳:**零业务逻辑,只编排 internal/***。与 CLI 的关系是同
 |---|---|---|
 | 状态/解锁 | GetAppState / Get·SaveWebDAVConfig / TestConnection / CreateAccount / Unlock / ImportFromRemote / Lock / ChangePassphrase | AppState 含 HasLocalKeyfile(Lock 页三分支判定)+ 当前盘名/盘数;Unlock 的 SuggestPullIndex = 本地空库 + O(1) Probe 远端 index.enc;CreateAccount 本地已有 keyfile 时走"开新库"分支(推现有 keyfile,口令不符 AUTH_FAILED);ChangePassphrase 多盘扇出 keyfile |
 | 多盘档案(TODO-21) | ListDrives / SaveDrive / DeleteDrive / SetActiveDrive | SaveDrive 编辑活动盘热更新客户端(SetRemote),新增走查重(URL+用户名+根目录);DeleteDrive 拒绝活动盘与最后一个盘,本地索引文件保留;SetActiveDrive 要求管线空闲、切走前尽力补备份、保持解锁态,发 `drive:switched` |
-| 浏览 | ListFolder / SearchAll / FileInfo / GetCover / SetFileCover / SetNote / SetUserMeta / DeleteEntries / EnsureFolder / MoveFiles / Get·UpdateFolderMeta | ListFolder 绑定层合成面包屑+条目+FolderSummaries(一次往返);FileDetail 是摊平 NullInt64 的 DTO;GetCover 三级来源:磁盘 LRU 缓存(键=文件 uuid)→ 远端 covers 命名空间(需解锁,[LOCKED])→ legacy thumbnails 回退;SetFileCover 导入走 ImportCover(断网回退出站箱返回 deferred,notify 提示)、清除纯索引零网络;UpdateFolderMeta 直传指针语义(nil=不动/零值=清除) |
+| 浏览 | ListFolder / SearchAll / FileInfo / GetCover / SetFileCover / SetNote / SetUserMeta / DeleteEntries / EnsureFolder / MoveEntries / Get·UpdateFolderMeta | ListFolder 绑定层合成面包屑+条目+FolderSummaries(一次往返);FileDetail 是摊平 NullInt64 的 DTO;GetCover 三级来源:磁盘 LRU 缓存(键=文件 uuid)→ 远端 covers 命名空间(需解锁,[LOCKED])→ legacy thumbnails 回退;SetFileCover 导入走 ImportCover(断网回退出站箱返回 deferred,notify 提示)、清除纯索引零网络;UpdateFolderMeta 直传指针语义(nil=不动/零值=清除);MoveEntries 文件+目录混合移动(语义见不变量 17) |
 | 传输 | PickFiles / PickDir / UploadPaths / DownloadTo / CancelTransfer / Transfers | 对话框在 Go 侧(v2.15 JS 运行时无 Open*Dialog);上传默认 pack、下载默认解压,不暴露 expand/keepZip |
 | 设置/维护 | Get·SaveSettings / BackupIndexNow / PreviewGC / RunGC | GC 两步确认;孤儿只报告 |
 
@@ -183,7 +183,7 @@ GUI 是纯壳:**零业务逻辑,只编排 internal/***。与 CLI 的关系是同
 14. 远端对象名与文件名无关:并发上传不撞名,重名消解只在索引事务内发生。
 15. pack 条目(TODO-15)明文区恰为一个标准 zip;上传校验遍**整次拒绝**坏树(非 UTF-8 名/特殊文件)不留半套索引;解压侧断言(UTF-8/不逃逸)+ 临时目录整体 rename,失败不落半个目录。
 16. 目录元数据(TODO-16)**不继承、不合并、无告警**:tag/作者/note 是目录自身属性,聚合面永不聚合元数据;写在哪个目录就属于哪个目录,kist 不做解释(哑远端约束同款)。
-17. mv 是纯索引操作:改挂点+重名消解单事务,**远端对象零变化**;修改 modified_at 不属于移动(最近更新保持内容语义)。
+17. mv/MoveEntries 是纯索引操作:改挂点+重名消解单事务,**远端对象零变化**;修改 modified_at 不属于移动(最近更新保持内容语义)。目录移动即改 folders.parent_id 一行——索引无物化路径,搜索 Path 由查询侧沿 parent 派生,子孙自动跟随;元数据/封面引用挂在目录 id 上与位置无关。已在目标=空转 no-op 不计 revision;移进自身子树、选区内祖先-后代同移、根/软删移动一律拒绝;目录撞目录 " (n)" 消解,与同名文件互不干扰(nameTakenTx 只查 files)。
 18. 一盘一库(TODO-21):索引文件锚定盘 ID,切换=空闲时关库开库+重建管线(保持解锁态,共用 keyfile 同一把 MK);两个档案不得指向同一远端库(URL+用户名+根目录查重),否则两个索引互踩 LWW。
 
 ## 9. 失败模式与恢复路径
@@ -224,7 +224,7 @@ GUI 是纯壳:**零业务逻辑,只编排 internal/***。与 CLI 的关系是同
 | outbox list/push/verify/discard | 出站箱搬运与收账 | ✗(纯密文) | `push.go` |
 | ls / search / info / note | 索引浏览与备注(ls 目录行附子树摘要;search 兼查目录名/tag) | ✗ | `index` 各查询 |
 | meta set/list | 目录/文件元数据:tag/note/封面引用(TODO-16/17;文件目标用 uuid\|id,--cover 仅目录,文件封面导入走 GUI) | ✗ | `UpdateFolderMeta`/`UpdateFileMeta` |
-| mv | 纯索引移动文件(改挂点,零远端流量;重名自动消解) | ✗ | `MoveFiles` |
+| mv | 纯索引移动文件与目录(源:目录 `/路径`、文件 `uuid\|id`;改挂点,零远端流量;重名自动消解;已在目标=空转) | ✗ | `MoveEntries` |
 | mkdir | 建虚拟目录(多级、幂等 mkdir -p 语义;纯索引零流量) | ✗ | `EnsureFolderPath` |
 | rename | 重命名目录或文件(同名幂等 no-op;撞名报错不消解;根/软删/非法段拒绝;纯索引零流量;目录 `/路径`,文件 `uuid\|id`) | ✗ | `RenameFolder`/`RenameFile` |
 | get [--keep-zip] | 下载解密;pack 还原成目录(或落 zip) | ✓ | `Manager.DownloadTo` |

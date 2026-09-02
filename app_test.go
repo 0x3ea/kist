@@ -237,7 +237,7 @@ func TestEnsureFolderAndMoveFiles(t *testing.T) {
 	if dest == 1 || dest == idA {
 		t.Fatalf("EnsureFolder 应建到最深一级:%d", dest)
 	}
-	if err := a.MoveFiles([]int64{f}, dest); err != nil {
+	if err := a.MoveEntries([]int64{f}, nil, dest); err != nil {
 		t.Fatal(err)
 	}
 	// 幂等:同一路径再建返回同一 id
@@ -436,5 +436,40 @@ func TestFileMetaAndCoverBinding(t *testing.T) {
 	}
 	if err := a.UpdateFileMeta(f, index.FileMetaUpdate{Tags: []string{"x"}}); err == nil {
 		t.Fatal("已删除文件的 meta 写应报错")
+	}
+}
+
+// TestAppMoveEntries 绑定编排:文件+目录混合选区一次调用落到索引层;
+// 空选区报 BAD_CONFIG(前端按码映射文案);环错误透传为 INTERNAL 类。
+func TestAppMoveEntries(t *testing.T) {
+	a := newTestApp(t)
+	idA := seedFolder(t, a.db, "合集A")
+	idSub := seedFolder(t, a.db, "合集A", "子目录")
+	f := seedFile(t, a.db, idA, "第01话.zip", true, 100)
+	idB := seedFolder(t, a.db, "合集B")
+
+	// 目录选区含祖先+后代:索引层拒绝
+	if err := a.MoveEntries(nil, []int64{idA, idSub}, idB); err == nil {
+		t.Fatal("祖先与后代同移应报错")
+	} else if !strings.HasPrefix(err.Error(), "[INTERNAL]") {
+		t.Fatalf("索引层错误应透传为 INTERNAL:%q", err.Error())
+	}
+
+	// 混合选区:A 整体 + A 里一话(文件在目录内合法,各落各的点)
+	if err := a.MoveEntries([]int64{f}, []int64{idA}, idB); err != nil {
+		t.Fatal(err)
+	}
+	v, err := a.ListFolder(idB)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(v.Entries) != 2 || v.Entries[0].Name != "合集A" || v.Entries[1].Name != "第01话.zip" {
+		t.Fatalf("混合移动落点:%+v", v.Entries)
+	}
+
+	// 空选区报 BAD_CONFIG
+	err = a.MoveEntries(nil, nil, idB)
+	if err == nil || !strings.HasPrefix(err.Error(), "[BAD_CONFIG]") {
+		t.Fatalf("空选区应报 BAD_CONFIG:%v", err)
 	}
 }

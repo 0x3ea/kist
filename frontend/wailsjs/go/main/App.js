@@ -78,8 +78,8 @@ export function Lock() {
   return window['go']['main']['App']['Lock']();
 }
 
-export function MoveFiles(arg1, arg2) {
-  return window['go']['main']['App']['MoveFiles'](arg1, arg2);
+export function MoveEntries(arg1, arg2, arg3) {
+  return window['go']['main']['App']['MoveEntries'](arg1, arg2, arg3);
 }
 
 export function PickDir() {

@@ -6,6 +6,7 @@ import (
 	"database/sql"
 	"fmt"
 	"slices"
+	"strings"
 	"testing"
 )
 
@@ -388,6 +389,131 @@ func TestMoveFiles(t *testing.T) {
 	f, _ = db.GetFile(ch3)
 	if f.FolderID != idB {
 		t.Fatal("失败事务应回滚")
+	}
+}
+
+// TestMoveEntries 目录移动(文件+目录混合入口)的语义验收:改挂点一行,
+// 子孙路径派生跟随;环/祖先-后代拒绝;空转 no-op 不计 revision;
+// 根/软删/缺目标拒绝。
+func TestMoveEntries(t *testing.T) {
+	db := newTestDB(t)
+	idA, idSub, _, _, _, notes := buildSeries(t, db)
+	idB := mustFolder(t, db, "作品B")
+	rev := func() uint64 {
+		t.Helper()
+		r, err := db.Revision()
+		if err != nil {
+			t.Fatal(err)
+		}
+		return r
+	}
+
+	// 目录移动:改挂点,子孙路径派生跟随(设定集及其 notes.txt 仍在其下)
+	rev0 := rev()
+	if err := db.MoveEntries(nil, []int64{idA}, idB); err != nil {
+		t.Fatal(err)
+	}
+	if got := rev(); got != rev0+1 {
+		t.Fatalf("移动应计一次 revision: %d → %d", rev0, got)
+	}
+	crumb, err := db.FolderPath(idSub)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var segs []string
+	for _, c := range crumb {
+		if c.Name != "" {
+			segs = append(segs, c.Name)
+		}
+	}
+	if got, want := strings.Join(segs, "/"), "作品B/作品A/设定集"; got != want {
+		t.Fatalf("子孙路径应跟随: got %q want %q", got, want)
+	}
+	if f, err := db.GetFile(notes); err != nil || f.FolderID != idSub {
+		t.Fatalf("孙级文件挂点不应变: %+v %v", f, err)
+	}
+
+	// 环:dest 即自身 / dest 在子树内
+	if err := db.MoveEntries(nil, []int64{idA}, idA); err == nil {
+		t.Fatal("移进自身应报错")
+	}
+	if err := db.MoveEntries(nil, []int64{idA}, idSub); err == nil {
+		t.Fatal("移进自身子树应报错")
+	}
+
+	// 选区内祖先-后代同移
+	if err := db.MoveEntries(nil, []int64{idA, idSub}, idB); err == nil {
+		t.Fatal("祖先与后代同移应报错")
+	}
+
+	// 空转 no-op:移回所在父,不计 revision
+	rev1 := rev()
+	if err := db.MoveEntries(nil, []int64{idA}, idB); err != nil {
+		t.Fatal(err)
+	}
+	if got := rev(); got != rev1 {
+		t.Fatalf("空转 no-op 不应计 revision: %d → %d", rev1, got)
+	}
+
+	// 根不可移;目标不存在拒绝;软删目录不可移
+	if err := db.MoveEntries(nil, []int64{1}, idB); err == nil {
+		t.Fatal("根目录不可移动")
+	}
+	if err := db.MoveEntries(nil, []int64{idA}, 9999); err == nil {
+		t.Fatal("目标不存在应报错")
+	}
+	idC := mustFolder(t, db, "作品C")
+	if err := db.SoftDeleteFolders([]int64{idC}); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.MoveEntries(nil, []int64{idC}, idB); err == nil {
+		t.Fatal("软删目录不可移动")
+	}
+}
+
+// TestMoveEntriesNameClash 撞名消解与文件/目录同名共存:目录撞目录 " (n)"
+// 递增;目录与文件同名互不干扰(两套消解只查各的表);混合移动一次事务
+// 恰计一次 revision。
+func TestMoveEntriesNameClash(t *testing.T) {
+	db := newTestDB(t)
+	idA := mustFolder(t, db, "作品A")
+	idB := mustFolder(t, db, "作品B")
+	// B 下已有同名目录与同名文件(文件/目录同名可共存)
+	_ = mustFolder(t, db, "作品B", "作品A")
+	_ = mustFileRow(t, db, row("作品A", idB, false, "ready", 1, 1))
+	// A 下备一个文件一起移
+	f := mustFileRow(t, db, row("第01话.zip", idA, true, "ready", 9, 9))
+
+	rev0, err := db.Revision()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := db.MoveEntries([]int64{f}, []int64{idA}, idB); err != nil {
+		t.Fatal(err)
+	}
+	rev1, _ := db.Revision()
+	if rev1 != rev0+1 {
+		t.Fatalf("混合移动应恰计一次 revision: %d → %d", rev0, rev1)
+	}
+
+	// 落点:目录消解为 "作品A (1)",原名目录与同名文件原样不动
+	entries, err := db.ListFolder(idB)
+	if err != nil {
+		t.Fatal(err)
+	}
+	names := map[string]bool{}
+	for _, e := range entries {
+		names[e.Name] = true
+	}
+	for _, want := range []string{"作品A", "作品A (1)"} {
+		if !names[want] {
+			t.Fatalf("缺条目 %q: %v", want, names)
+		}
+	}
+	// 被移文件消解:B 下无同名文件,保持原名
+	got, err := db.GetFile(f)
+	if err != nil || got.FolderID != idB || got.Name != "第01话.zip" {
+		t.Fatalf("文件落点: %+v %v", got, err)
 	}
 }
 
