@@ -58,7 +58,7 @@ export function RenameFile(arg1:number,arg2:string):Promise<void>;
 
 export function RenameFolder(arg1:number,arg2:string):Promise<void>;
 
-export function ResolveConflict(arg1:string,arg2:string):Promise<void>;
+export function ResolveConflict(arg1:string,arg2:string,arg3:number):Promise<boolean>;
 
 export function RunGC():Promise<main.GCReport>;
 
@@ -77,6 +77,8 @@ export function SetFileCover(arg1:number,arg2:string):Promise<boolean>;
 export function SetNote(arg1:number,arg2:string):Promise<void>;
 
 export function SetUserMeta(arg1:number,arg2:string):Promise<void>;
+
+export function SyncConflictDetail():Promise<backup.ConflictDetail>;
 
 export function TestConnection(arg1:main.WebDAVConfig):Promise<main.TestResult>;
 

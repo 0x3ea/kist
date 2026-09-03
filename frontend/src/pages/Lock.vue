@@ -1,8 +1,8 @@
 <script setup lang="ts">
 // Lock.vue — 解锁页三分支(phase-7 约定):
 //   1) 未配置 → 首次向导:WebDAV 表单 + 测试连接 → 设口令 → 建账户
-//   2) 已配置且有本地 keyfile → 输口令解锁;若解锁后发现本地空库且远端有
-//      备份(UnlockResult.SuggestPullIndex),提示一键"从远端恢复"
+//   2) 已配置且有本地 keyfile → 输口令解锁;解锁后后台自动对账(TODO-22),
+//      空库+远端有备份会被自动恢复(原 SuggestPullIndex 手动引导已退役)
 //   3) 已配置且无本地 keyfile → 新设备,直接"从远端恢复"(ImportFromRemote)
 import { computed, reactive, ref, watch } from 'vue'
 import { main } from '../../wailsjs/go/models'
@@ -85,20 +85,11 @@ async function onCreate() {
 
 // ---- 解锁 ----
 const pass = ref('')
-const unlockHint = ref<main.UnlockResult | null>(null)
 
 async function onUnlock() {
-  const r = await unlock(pass.value)
+  const ok = await unlock(pass.value)
   pass.value = ''
-  if (r) unlockHint.value = r
-}
-
-async function onPullIndex() {
-  // 解锁后补拉索引(口令已验证过,但 ImportFromRemote 需要再次传入)
-  const p = prompt('请再输入一次口令以拉取远端索引') ?? ''
-  if (!p) return
-  await importFromRemote(p)
-  unlockHint.value = null
+  return ok
 }
 
 // ---- 新设备恢复 ----
@@ -160,12 +151,6 @@ async function onRecover() {
         <p class="hint">{{ state.FileCount }} 个文件在索引中</p>
         <label>口令<input v-model="pass" type="password" @keyup.enter="onUnlock" /></label>
         <button class="primary" :disabled="!pass" @click="onUnlock">解锁</button>
-
-        <!-- 本地空库且远端有备份:引导恢复(缩略图/备注随索引回来) -->
-        <div v-if="unlockHint?.SuggestPullIndex" class="pull-hint">
-          本地索引是空的,但远端检测到备份。
-          <button @click="onPullIndex">从远端恢复索引</button>
-        </div>
       </template>
 
       <!-- ③ 新设备恢复 -->
@@ -261,18 +246,6 @@ label.check input {
 
 .msg.err {
   color: var(--err);
-}
-
-.pull-hint {
-  background: var(--panel-2);
-  border: 1px solid var(--line);
-  border-radius: var(--radius);
-  padding: 10px;
-  font-size: 13px;
-  display: flex;
-  flex-direction: column;
-  gap: 8px;
-  align-items: flex-start;
 }
 
 .switch {

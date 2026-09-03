@@ -177,6 +177,7 @@ CREATE TABLE sync_state (key TEXT PRIMARY KEY, value TEXT NOT NULL);
 
 - `BackupNow`:`SnapshotTo(tmp)` → blob 格式加密(填 mtime/revision/deviceID)→ PUT index.enc(备注/缩略图随库同步)。触发:变更后防抖 30s / 手动 / 退出前。**TODO-09 起 push 前三方比较**(本地/基线 last_synced_rev/远端 header revision):只有本机动过才推;只有远端动过报 remote-ahead 指引先拉;双方都动过即分叉,拒绝静默覆盖,人裁决(保留本机 = `--force` 推;保留云端 = `pull --force`,本机归档)。远端头部截断(CorruptBlob)放行自愈;钥匙不符(WrongKey,含头部翻转的不可区分形态)拒绝,守住跨账户。
 - `PullRemote`:GET → 读 header 的 revision,与本地 revision、基线三方比较:本机未动+远端动过 → 快进替换(旧库归档 `backups/index-<rev>-<ts>.db`);双方未动 → noop;只有本机动过 → 提示推送;双方都动过 → 分叉拒绝(force 采纳远端,`Forked=true`)。替换后基线重写为远端 revision(快照带着的是对方的基线)。
+- **TODO-22 起对账前移**:GUI 解锁/切盘后后台跑 `Reconcile`(同套三方比较,动作委托 BackupNow/PullRemote 原语重跑检测防竞态)——双方未动 noop;只有本地动**补推**(否决"纯云权威一律回滚":本地领先多为离线/崩溃遗留,回滚即丢工作且离线删除复活;云权威认的是"已同步的云端状态");只有远端动**快进拉**(空库新设备自动恢复,Unlock 的 SuggestPullIndex 退役);双方动交人裁决(SyncConflictDialog 文件级 diff 三栏,决策仍是整库二选一)。**force 裁决前必须 `EnsureRemoteRev` 重检**——对账把弹窗窗口拉长到分钟级,期间对端再推不核对就静默覆盖。对账失败可跳过:每次 push/pull 自带同款检测,正确性不依赖对账。
 - 明确不做行级 merge:面向单用户、同时单写者;冲突败方归档保留而非合并。已知边界:force 推送后若其他设备 revision 计数恰好相同且无新改动,其 pull 会 noop(计数证人无法区分同数内容),任一侧下一次写操作即触发分叉检出。
 
 ## 传输管线(internal/transfer)

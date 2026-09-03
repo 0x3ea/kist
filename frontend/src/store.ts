@@ -58,7 +58,9 @@ export function settleConfirm(ok: boolean) {
 }
 
 /** 同步分叉待裁决(TODO-09):Go 侧 sync:conflict 事件驱动。
- * pending = 冲突存在未裁决(Settings 横幅据此显示);open = 对话框可见。 */
+ * pending = 冲突存在未裁决(Settings 横幅据此显示);open = 对话框可见。
+ * detail = 冲突详情(TODO-22):对话框打开时按需拉取,含文件级 diff 三栏;
+ * stale 刷新复用同一字段。 */
 export const syncConflict = reactive<{
   pending: boolean
   open: boolean
@@ -67,7 +69,39 @@ export const syncConflict = reactive<{
   remoteRev: number
   baselineRev: number
   remoteDevice: string
-}>({ pending: false, open: false, kind: '', localRev: 0, remoteRev: 0, baselineRev: 0, remoteDevice: '' })
+  detail: backup.ConflictDetail | null
+  detailLoading: boolean
+}>({
+  pending: false,
+  open: false,
+  kind: '',
+  localRev: 0,
+  remoteRev: 0,
+  baselineRev: 0,
+  remoteDevice: '',
+  detail: null,
+  detailLoading: false,
+})
+
+/** 拉取冲突详情(对话框打开时调用;force=true 用于 stale 后强制刷新) */
+export async function loadConflictDetail(force = false) {
+  if (syncConflict.detailLoading || (!force && syncConflict.detail)) return
+  syncConflict.detailLoading = true
+  try {
+    const d = await API.SyncConflictDetail()
+    syncConflict.detail = d
+    // 详情是重新探测的结果,局面可能已与事件时刻不同:一并刷新头部数字
+    syncConflict.kind = d.Kind
+    syncConflict.localRev = d.LocalRev
+    syncConflict.remoteRev = d.RemoteRev
+    syncConflict.baselineRev = d.BaselineRev
+    syncConflict.remoteDevice = d.RemoteDevice
+  } catch (e) {
+    fail(e)
+  } finally {
+    syncConflict.detailLoading = false
+  }
+}
 
 /** 关掉对话框但保留冲突横幅入口("稍后处理") */
 export function dismissConflict() {
@@ -172,7 +206,8 @@ export async function init() {
   })
   EventsOn('notify', (n) => toast(n?.level === 'error' ? 'error' : 'info', n?.text ?? ''))
   EventsOn('sync:conflict', (c) => {
-    // 同步分叉待裁决(TODO-09):自动/手动备份被拦下时后端发出
+    // 同步分叉待裁决(TODO-09):自动/手动备份被拦下或启动对账(TODO-22)检出时发出。
+    // 详情(文件级 diff)清空待拉——冲突可能在弹窗打开前已过时,打开时重新探测。
     Object.assign(syncConflict, {
       pending: true,
       open: true,
@@ -181,18 +216,29 @@ export async function init() {
       remoteRev: c?.remoteRev ?? 0,
       baselineRev: c?.baselineRev ?? 0,
       remoteDevice: c?.remoteDevice ?? '',
+      detail: null,
+      detailLoading: false,
     })
+    loadConflictDetail()
   })
 }
 
-/** 分叉裁决(TODO-09):keep-local = 覆盖远端;keep-remote = 采纳远端(本机归档) */
+/** 分叉裁决(TODO-09):keep-local = 覆盖远端;keep-remote = 采纳远端(本机归档)。
+ * 裁决带 expectRemoteRev(TODO-22 硬要求):后端 force 前重检远端头部,
+ * 已变化时返回 false——刷新详情,弹窗保持打开,让用户基于新差异重新裁决。 */
 export async function resolveConflict(action: 'keep-local' | 'keep-remote'): Promise<boolean> {
   const done = setBusy('处理同步冲突…')
   try {
     // keep-remote 需复核口令(与 Lock 页"从远端恢复索引"同款 prompt)
     const pass = action === 'keep-remote' ? (prompt('请输入口令以采纳远端索引') ?? '') : ''
     if (action === 'keep-remote' && !pass) return false
-    await API.ResolveConflict(action, pass)
+    const expect = syncConflict.detail?.RemoteRev ?? syncConflict.remoteRev
+    const resolved = await API.ResolveConflict(action, pass, expect)
+    if (!resolved) {
+      toast('info', '云端又有新变化,已刷新差异,请重新确认')
+      await loadConflictDetail(true)
+      return false
+    }
     syncConflict.pending = false
     syncConflict.open = false
     return true

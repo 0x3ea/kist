@@ -70,6 +70,7 @@ internal/migrate  网盘间纯密文迁移(枚举/断点搬运/双端校验)
 - zsh 不做变量分词:脚本里封装命令要用函数,不是 `K="go run ..."` 加 `$K`
 - `--dest` 是虚拟目录(索引侧路径),`--to` 才是本地目录;虚拟路径容忍 `./` 前缀,拒绝 `..`
 - Argon2 参数必须设上界(keyfile 携带天文数字参数是资源耗尽攻击向量)
+- wails 绑定生成器会**整字段丢弃**空名 json tag(如 `Diff T \`json:",omitempty"\``):前端类型缺该字段,`wails dev/build` 编译失败;跨端结构体要么不挂 tag,要么 tag 写全字段名(实测踩过,TODO-22)
 
 ## Claude Code 工具坑(实测踩过)
 

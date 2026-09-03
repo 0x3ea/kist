@@ -46,7 +46,7 @@ cmd/kistctl(CLI 壳,1440 行)        main.go+app*.go(Wails GUI 壳,Phase 7:31 �
 | index | ~1900 | SQLite 明文索引:虚拟目录、文件账本、目录/文件元数据 tag(TODO-16/17)、子树聚合、封面轻引用(TODO-10)、blob 登记、revision、快照/替换/库文件迁移 | `db.go`(打开/WithTx/快照/替换/MigrateIndexFile)、`schema.go`(迁移)、`files.go`、`folders.go`、`summary.go`(聚合+封面三级链)、`covers.go`、`blobs.go`、`outbox.go`、`thumbnails.go`(legacy 只读) |
 | crypto | 754 | 加密核心:口令→MK 包装(keyfile)、流式分块加解密(blob)、v2 大小量化 | `blob.go`(Writer/Reader)、`keyfile.go`、`format.go`(常量与档位)、`keys.go`(HKDF) |
 | dav | 542 | WebDAV 语义 + 网络可靠性:定长 PUT、流式 GET、O(1) Probe、重试退避 | `client.go`、`retry.go` |
-| backup | ~330 | 索引云备份与多设备恢复:push/pull 前三方比较(本地/基线/远端 header),分叉拒绝静默覆盖交人裁决(TODO-09) | `backup.go` |
+| backup | ~640 | 索引云备份与多设备恢复:push/pull 前三方比较(本地/基线/远端 header),分叉拒绝静默覆盖交人裁决(TODO-09);启动对账(TODO-22:解锁后 noop/补推/快进拉/分叉四局面)+ 冲突详情文件级 diff + 裁决前重检 | `backup.go`、`reconcile.go`(Reconcile/EnsureRemoteRev/FetchConflictDetail)、`diff.go`(DiffIndex 三栏) |
 | migrate | 188 | 网盘间纯密文搬运:断点续搬、双端校验 | `migrate.go` |
 | remote | ~230 | 远端对象语义:名字→路径、保留名、主/封面两命名空间的 blob 增删查 | `store.go` |
 | config | 276 | KIST_HOME 路径、config.json(schema v2:drives[]+active 多盘档案,旧格式自动迁移)、盘 ID/查重、设置归一化 | `config.go` |
@@ -68,7 +68,7 @@ GUI 是纯壳:**零业务逻辑,只编排 internal/***。与 CLI 的关系是同
 
 | 分组 | 方法 | 说明 |
 |---|---|---|
-| 状态/解锁 | GetAppState / Get·SaveWebDAVConfig / TestConnection / CreateAccount / Unlock / ImportFromRemote / Lock / ChangePassphrase | AppState 含 HasLocalKeyfile(Lock 页三分支判定)+ 当前盘名/盘数;Unlock 的 SuggestPullIndex = 本地空库 + O(1) Probe 远端 index.enc;CreateAccount 本地已有 keyfile 时走"开新库"分支(推现有 keyfile,口令不符 AUTH_FAILED);ChangePassphrase 多盘扇出 keyfile |
+| 状态/解锁 | GetAppState / Get·SaveWebDAVConfig / TestConnection / CreateAccount / Unlock / ImportFromRemote / Lock / ChangePassphrase / SyncConflictDetail / ResolveConflict | AppState 含 HasLocalKeyfile(Lock 页三分支判定)+ 当前盘名/盘数;Unlock 成功即后台跑启动对账(见下);SyncConflictDetail 按需拉冲突详情(整拉远端索引,三方局面 + diff);ResolveConflict 裁决前重检 expectRemoteRev,远端已变返回 resolved=false 由前端刷新重裁决;CreateAccount 本地已有 keyfile 时走"开新库"分支(推现有 keyfile,口令不符 AUTH_FAILED);ChangePassphrase 多盘扇出 keyfile |
 | 多盘档案(TODO-21) | ListDrives / SaveDrive / DeleteDrive / SetActiveDrive | SaveDrive 编辑活动盘热更新客户端(SetRemote),新增走查重(URL+用户名+根目录);DeleteDrive 拒绝活动盘与最后一个盘,本地索引文件保留;SetActiveDrive 要求管线空闲、切走前尽力补备份、保持解锁态,发 `drive:switched` |
 | 浏览 | ListFolder / SearchAll / FileInfo / GetCover / SetFileCover / SetNote / SetUserMeta / DeleteEntries / EnsureFolder / MoveEntries / Get·UpdateFolderMeta | ListFolder 绑定层合成面包屑+条目+FolderSummaries(一次往返);FileDetail 是摊平 NullInt64 的 DTO;GetCover 三级来源:磁盘 LRU 缓存(键=文件 uuid)→ 远端 covers 命名空间(需解锁,[LOCKED])→ legacy thumbnails 回退;SetFileCover 导入走 ImportCover(断网回退出站箱返回 deferred,notify 提示)、清除纯索引零网络;UpdateFolderMeta 直传指针语义(nil=不动/零值=清除);MoveEntries 文件+目录混合移动(语义见不变量 17) |
 | 传输 | PickFiles / PickDir / UploadPaths / DownloadTo / CancelTransfer / Transfers | 对话框在 Go 侧(v2.15 JS 运行时无 Open*Dialog);上传默认 pack、下载默认解压,不暴露 expand/keepZip |
@@ -76,7 +76,9 @@ GUI 是纯壳:**零业务逻辑,只编排 internal/***。与 CLI 的关系是同
 
 **事件接线**:管线的 `Emit` 回调即 `onTransferEvent`——全部事件透传 `runtime.EventsEmit`,其中 `index:changed` 同时驱动壳层防抖备份(App 是转发器+消费者,不经 EventsOn 自我订阅)。`drive:switched`(TODO-21)通知前端回根目录、清选择/缩略图/传输列表。startup 事件先于前端订阅即丢失 → 前端 `store.init()` 主动拉初值。
 
-**防抖自动备份**(壳层机制,phase-7 约定):`index:changed` → 重置 30s `time.AfterFunc`(仅 AutoBackup 开且已解锁)→ `BackupNow`(Background+60s 超时,忙则重排不丢变更)→ notify。**退出前备份不受 AutoBackup 限制**:shutdown 时已解锁且 `db.Revision() > lastBackupRev`(会话内追踪,基线=解锁时;`sync_state.last_backup_at` 只存时间不存 revision)则补一次,失败仅记日志。
+**防抖自动备份**(壳层机制,phase-7 约定):`index:changed` → 重置 30s `time.AfterFunc`(仅 AutoBackup 开且已解锁)→ `BackupNow`(Background+60s 超时,忙则重排不丢变更)→ notify。**无未推送改动就免推**(TODO-22):`revision == last_synced_rev` 直接返回(对账快进拉取后的 index:changed 也排定时器,不免推会空推同一份快照);真正的重试场景(上次推送失败)基线必然落后,不受影响。**退出前备份不受 AutoBackup 限制**:shutdown 时已解锁且 `db.Revision() > lastBackupRev`(会话内追踪,基线=解锁时;`sync_state.last_backup_at` 只存时间不存 revision)则补一次,失败仅记日志。
+
+**启动对账**(TODO-22,壳层触发):Unlock 成功 / SetActiveDrive 换库后(解锁态)后台跑 `backup.Reconcile`——与防抖/手动备份共用 `backingUp` 互斥(被抢先即让路,备份自带同款检测)、有待裁决分叉时跳过。四局面:双方未动 noop;只有本地动**补推**(离线/崩溃留下的未推送工作先入账,不做"纯云权威回滚"——回滚会让离线工作从视图消失、离线删除复活);只有远端动**快进拉**(自动恢复,空库新设备同此路径,SuggestPullIndex 手动引导已退役);双方都动 `recordConflict` 弹窗。失败一次性提示不重试——每次 push/pull 自带同款检测,正确性不依赖对账。
 
 **错误码传递**:Wails 把绑定 error 序列化为纯字符串 reject promise,而 `AppError.Error()` 只有 Msg——壳层 `codedError` 统一包 `"[CODE] Msg"`,前端 `errors.ts` 正则反解映射中文文案。`internal/errs` 不动(CLI 输出不受影响)。
 
@@ -245,8 +247,8 @@ GUI 是纯壳:**零业务逻辑,只编排 internal/***。与 CLI 的关系是同
 | crypto | 16 | keyfile 往返/错口令/参数篡改/改口令;blob 往返/篡改/截断/重排/追加/final 冒充/错密钥/v2 填充完整性/流式内存峰值 |
 | dav | 14 | MKCOL 幂等、EnsureDir 幂等、List 目录条目标记、PUT 定长、503/429 退避、4xx 不重试、ctx 取消、Probe 精确请求与网络错误区分 |
 | remote | 2 | TODO-10:covers 命名空间往返(EnsureCoversRoot 记忆化/Put/Probe/Get/Delete/List)、ListBlobs 跳过目录条目、ListAll 携带 IsDir |
-| index | ~33 | 目录树、软删可见性、搜索、revision 并发单调、快照/替换往返、重名消解、pack 列往返、库文件迁移(MigrateIndexFile 改名保数据/幂等/目标存在不动);TODO-16:元数据往返/死 tag 清理、目录检索三路命中+软删祖先、子树聚合、封面三级回退(悬空/混合序/截断/留白)、纯索引移动+回滚、元数据经快照存活;TODO-17:文件元数据往返、双形态共享词表的双向死词清理、文件 tag 命中+Tags 回填、v3→v4 升级、手动封面经快照存活;TODO-10:covers 往返(uploading 不可见)、prevBlob 闭环(替换/清除同事务 trash+回滚)、出站箱三路径(defer 双账/收账双翻转/仅封面 discard)、v4→v5 升级(legacy 兜底)、covers 经快照存活、legacy 行进封面链 |
-| backup | 6 | 双设备往返、错密钥、无备份、损坏备份、uploading 状态随备份同步 |
+| index | ~35 | 目录树、软删可见性、搜索、revision 并发单调、快照/替换往返、重名消解、pack 列往返、库文件迁移(MigrateIndexFile 改名保数据/幂等/目标存在不动);TODO-16:元数据往返/死 tag 清理、目录检索三路命中+软删祖先、子树聚合、封面三级回退(悬空/混合序/截断/留白)、纯索引移动+回滚、元数据经快照存活;TODO-17:文件元数据往返、双形态共享词表的双向死词清理、文件 tag 命中+Tags 回填、v3→v4 升级、手动封面经快照存活;TODO-10:covers 往返(uploading 不可见)、prevBlob 闭环(替换/清除同事务 trash+回滚)、出站箱三路径(defer 双账/收账双翻转/仅封面 discard)、v4→v5 升级(legacy 兜底)、covers 经快照存活、legacy 行进封面链;TODO-22:活路径清单(目录+文件/软删子树不可见)、快照同构查询 |
+| backup | 13 | 双设备往返、错密钥、无备份、损坏备份、uploading 状态随备份同步;TODO-22:对账四局面矩阵(含空库自动恢复)、无备份对账两分支、对账错密钥拒绝、远端截断上抛不自愈、重检三态(一致/ stale /远端消失)、详情 diff 三栏+local-ahead 无 diff+无备份报错、diff 截断保真 |
 | transfer | 10 | 临时目录清理留痕;打包粒度五形态、校验整次拒绝、zip 往返(空文件/空目录/unicode/mtime)、取消、zip-slip、非 UTF-8 条目 |
 | logging | 2 | 轮转阈值 |
 | e2e | ~28 | 全生命周期(--expand 逐文件路径)、重名、取消、错密钥、孤儿留痕;出站箱 6 例(verify 大小不符/push 两档政策/discard);迁移 4 例(断点续跑/无 keyfile/无 index.enc);pack 2 例(多话对象数=叶数/还原 SHA/keep-zip、单话直挂);TODO-16 两例(真实缩略图管线下的 meta/mv/摘要/备份恢复/封面回退);TODO-10 五例(直传封面落 covers 命名空间且 revision 只 +1、defer→push 封面同账收账、verify 不误删封面产物+discard 级联、gc 两命名空间分账+封面孤儿不删、存量迁移断点续跑/字节一致/恰 +1 revision/VACUUM 收缩/dry-run 不动数据) |

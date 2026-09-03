@@ -35,6 +35,96 @@ export namespace backup {
 		    return a;
 		}
 	}
+	export class DiffList {
+	    items: string[];
+	    total: number;
+	
+	    static createFrom(source: any = {}) {
+	        return new DiffList(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.items = source["items"];
+	        this.total = source["total"];
+	    }
+	}
+	export class DiffResult {
+	    localOnly: DiffList;
+	    remoteOnly: DiffList;
+	    changed: DiffList;
+	
+	    static createFrom(source: any = {}) {
+	        return new DiffResult(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.localOnly = this.convertValues(source["localOnly"], DiffList);
+	        this.remoteOnly = this.convertValues(source["remoteOnly"], DiffList);
+	        this.changed = this.convertValues(source["changed"], DiffList);
+	    }
+	
+		convertValues(a: any, classs: any, asMap: boolean = false): any {
+		    if (!a) {
+		        return a;
+		    }
+		    if (a.slice && a.map) {
+		        return (a as any[]).map(elem => this.convertValues(elem, classs));
+		    } else if ("object" === typeof a) {
+		        if (asMap) {
+		            for (const key of Object.keys(a)) {
+		                a[key] = new classs(a[key]);
+		            }
+		            return a;
+		        }
+		        return new classs(a);
+		    }
+		    return a;
+		}
+	}
+	export class ConflictDetail {
+	    Kind: string;
+	    LocalRev: number;
+	    RemoteRev: number;
+	    BaselineRev: number;
+	    RemoteDevice: string;
+	    Diff: DiffResult;
+	
+	    static createFrom(source: any = {}) {
+	        return new ConflictDetail(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.Kind = source["Kind"];
+	        this.LocalRev = source["LocalRev"];
+	        this.RemoteRev = source["RemoteRev"];
+	        this.BaselineRev = source["BaselineRev"];
+	        this.RemoteDevice = source["RemoteDevice"];
+	        this.Diff = this.convertValues(source["Diff"], DiffResult);
+	    }
+	
+		convertValues(a: any, classs: any, asMap: boolean = false): any {
+		    if (!a) {
+		        return a;
+		    }
+		    if (a.slice && a.map) {
+		        return (a as any[]).map(elem => this.convertValues(elem, classs));
+		    } else if ("object" === typeof a) {
+		        if (asMap) {
+		            for (const key of Object.keys(a)) {
+		                a[key] = new classs(a[key]);
+		            }
+		            return a;
+		        }
+		        return new classs(a);
+		    }
+		    return a;
+		}
+	}
+	
+	
 	export class PullResult {
 	    Action: string;
 	    RemoteRev: number;
@@ -494,7 +584,6 @@ export namespace main {
 	}
 	export class UnlockResult {
 	    PulledRemoteKeyfile: boolean;
-	    SuggestPullIndex: boolean;
 	    FileCount: number;
 	
 	    static createFrom(source: any = {}) {
@@ -504,7 +593,6 @@ export namespace main {
 	    constructor(source: any = {}) {
 	        if ('string' === typeof source) source = JSON.parse(source);
 	        this.PulledRemoteKeyfile = source["PulledRemoteKeyfile"];
-	        this.SuggestPullIndex = source["SuggestPullIndex"];
 	        this.FileCount = source["FileCount"];
 	    }
 	}

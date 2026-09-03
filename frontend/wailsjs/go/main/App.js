@@ -106,8 +106,8 @@ export function RenameFolder(arg1, arg2) {
   return window['go']['main']['App']['RenameFolder'](arg1, arg2);
 }
 
-export function ResolveConflict(arg1, arg2) {
-  return window['go']['main']['App']['ResolveConflict'](arg1, arg2);
+export function ResolveConflict(arg1, arg2, arg3) {
+  return window['go']['main']['App']['ResolveConflict'](arg1, arg2, arg3);
 }
 
 export function RunGC() {
@@ -144,6 +144,10 @@ export function SetNote(arg1, arg2) {
 
 export function SetUserMeta(arg1, arg2) {
   return window['go']['main']['App']['SetUserMeta'](arg1, arg2);
+}
+
+export function SyncConflictDetail() {
+  return window['go']['main']['App']['SyncConflictDetail']();
 }
 
 export function TestConnection(arg1) {
