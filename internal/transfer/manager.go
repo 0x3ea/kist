@@ -231,6 +231,7 @@ func (m *Manager) expandFolder(ctx context.Context, p string, destFolderID int64
 		if rel == "." {
 			// 根目录自身也要入清单:叶子目录(无子目录)时没有更深的目录
 			// 会连带建出它,漏掉会让根下文件拿到零值 folderID 撞外键
+			// (文件夹下载的 Mixed e2e 首次暴露,此前用例的展开目标都有子目录)
 			dirs = append(dirs, []string{base})
 			return nil
 		}
@@ -361,9 +362,29 @@ type DownloadOptions struct {
 
 // DownloadTo 把索引中的文件下载解密到 destDir(不存在则创建);返回入队数。
 // pack 条目默认解压还原成文件夹(临时目录整体 rename 保原子落盘)。
+// DownloadEntriesTo 的文件 only 薄包装(整目录下载见它)。
 func (m *Manager) DownloadTo(ctx context.Context, fileIDs []int64, destDir string, opts ...DownloadOptions) (int, error) {
+	queued, _, err := m.DownloadEntriesTo(ctx, fileIDs, nil, destDir, opts...)
+	return queued, err
+}
+
+// DownloadEntriesTo 把文件与文件夹一起下载解密(与 MoveEntries 同构的
+// "文件与目录同收"入口):文件平铺落 destDir;每个文件夹包一层 "<目录名>/"
+// 并按虚拟结构重建子树——嵌套目录与空目录都建,pack 条目仍走解压还原。
+//
+// uploading 的两种待遇是刻意的:显式点名的 fileIDs 照常入队,由运行时守卫
+// 给出"先 outbox push"的指引性拒绝(TODO-13 语义,outbox e2e 固化);子树内
+// 扫出来的 uploading 则规划期跳过并计入 skipped、其所在目录照建——批量里
+// 跳过给明确统计比逐个失败有用,且该条目在浏览界面本就不可见。
+//
+// 顺序铁律:全部规划 → 全部 mkdir → 全部入队——worker 在 add() 后即被
+// 并发消费,目录必须先于任何任务存在:空目录没有任务替它建;pack 条目的
+// 运行时 uniqueLocalName 消解也依赖先建目录才"看得见"同名的虚拟目录
+// (索引允许文件与目录同名,后建会让 rename 撞车)。
+// 校验/规划遍先收齐全部问题再统一落盘(planFolderTree/MoveEntries 同哲学)。
+func (m *Manager) DownloadEntriesTo(ctx context.Context, fileIDs, folderIDs []int64, destDir string, opts ...DownloadOptions) (queued, skipped int, err error) {
 	if err := os.MkdirAll(destDir, 0o755); err != nil {
-		return 0, err
+		return 0, 0, err
 	}
 	keepZip := false
 	for _, o := range opts {
@@ -371,16 +392,39 @@ func (m *Manager) DownloadTo(ctx context.Context, fileIDs []int64, destDir strin
 			keepZip = true
 		}
 	}
-	queued := 0
+
+	var specs []downloadSpec
+	var mkdirs []string
+	taken := map[string]bool{} // 同批根目录占位:尚未落盘,文件系统看不见
 	for _, fid := range fileIDs {
 		f, err := m.deps.DB.GetFile(fid)
 		if err != nil {
-			return queued, errs.From(err)
+			return 0, skipped, errs.From(err)
 		}
-		m.enqueueDownload(ctx, f, destDir, keepZip)
+		specs = append(specs, downloadSpec{file: f, destDir: destDir, name: f.Name})
+	}
+	for _, folderID := range folderIDs {
+		ft, err := m.planFolderTree(folderID, destDir, taken)
+		if err != nil {
+			return 0, skipped, err
+		}
+		skipped += ft.skipped
+		mkdirs = append(mkdirs, ft.rootLocal)
+		for _, d := range ft.dirs {
+			mkdirs = append(mkdirs, filepath.Join(ft.rootLocal, d))
+		}
+		specs = append(specs, ft.specs...)
+	}
+	for _, d := range mkdirs {
+		if err := os.MkdirAll(d, 0o755); err != nil {
+			return 0, skipped, err
+		}
+	}
+	for _, s := range specs {
+		m.enqueueDownloadSpec(ctx, s, keepZip)
 		queued++
 	}
-	return queued, nil
+	return queued, skipped, nil
 }
 
 // uploadSpec 是一次上传任务的入队描述(普通文件与 pack 共用)。
@@ -401,15 +445,6 @@ func (m *Manager) enqueueUploadSpec(ctx context.Context, s uploadSpec, deferred 
 		pack: s.pack, sizeHint: s.sizeHint}
 	j.tr = &Transfer{ID: id, Kind: "upload", Name: s.name, Phase: PhaseQueued,
 		BytesTotal: 0, StartedAt: time.Now().Unix()}
-	m.add(j)
-}
-
-func (m *Manager) enqueueDownload(ctx context.Context, f index.FileRow, destDir string, keepZip bool) {
-	jctx, cancel := context.WithCancel(ctx)
-	id := newHexID()
-	j := &job{ctx: jctx, cancel: cancel, file: f, destDir: destDir, keepZip: keepZip}
-	j.tr = &Transfer{ID: id, Kind: "download", Name: f.Name, UUID: f.UUID, Phase: PhaseQueued,
-		BytesTotal: f.Size + f.CipherSize, StartedAt: time.Now().Unix()}
 	m.add(j)
 }
 

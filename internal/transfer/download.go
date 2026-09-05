@@ -148,7 +148,23 @@ func (m *Manager) runDownload(j *job) error {
 
 // uniqueLocalName 目标已存在时追加 "(1)"、"(2)"…(下载侧文件系统消解)。
 func uniqueLocalName(dir, name string) string {
-	if _, err := os.Stat(filepath.Join(dir, name)); os.IsNotExist(err) {
+	return uniqueLocalNameTaken(dir, name, nil)
+}
+
+// uniqueLocalNameTaken 在 uniqueLocalName 基础上叠加 taken 集合:文件夹下载
+// 同批的兄弟根目录尚未落盘、文件系统看不见,规划期用集合占位消解(命中后
+// 由调用方记入)。taken 为 nil 时退化为纯文件系统消解。
+func uniqueLocalNameTaken(dir, name string, taken map[string]bool) string {
+	free := func(n string) bool {
+		if taken[n] { // nil map 读零值,无需判空
+			return false
+		}
+		if _, err := os.Stat(filepath.Join(dir, n)); os.IsNotExist(err) {
+			return true
+		}
+		return false
+	}
+	if free(name) {
 		return name
 	}
 	ext := ""
@@ -158,7 +174,7 @@ func uniqueLocalName(dir, name string) string {
 	base := strings.TrimSuffix(name, ext)
 	for i := 1; i <= 9999; i++ {
 		c := fmt.Sprintf("%s (%d)%s", base, i, ext)
-		if _, err := os.Stat(filepath.Join(dir, c)); os.IsNotExist(err) {
+		if free(c) {
 			return c
 		}
 	}
