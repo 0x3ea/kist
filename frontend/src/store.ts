@@ -838,12 +838,15 @@ export async function upload(kind: 'files' | 'folder') {
 
 export async function downloadSelected() {
   const files = [...store.selection]
-  if (files.length === 0) return
+  const folders = [...store.folderSelection]
+  if (files.length + folders.length === 0) return
   try {
     const dir = await API.PickDir()
     if (!dir) return
-    const n = await API.DownloadTo(files, dir)
-    toast('info', `已入队 ${n} 个下载`)
+    // 文件与目录同收:目录整棵子树按虚拟结构还原到所选目录的 <目录名>/ 下
+    const plan = await API.DownloadEntries(files, folders, dir)
+    const extra = plan.skipped > 0 ? `,跳过 ${plan.skipped} 个待上传` : ''
+    toast('info', `已入队 ${plan.queued} 个下载${extra}`)
     goTransfers()
   } catch (e) {
     fail(e)

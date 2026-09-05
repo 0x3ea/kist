@@ -92,27 +92,36 @@ func (a *App) UploadPaths(paths []string, destFolderID int64) (n int, err error)
 	return n, nil
 }
 
-// DownloadTo 异步入队下载(pack 默认解压还原目录),立即返回入队数。
-func (a *App) DownloadTo(fileIDs []int64, destDir string) (n int, err error) {
+// DownloadPlan 是一次下载入队的统计:Queued 实际入队数,Skipped 为子树内
+// 跳过的待上传文件数(显式点名的文件不算,那些会入队并被指引性拒绝)。
+type DownloadPlan struct {
+	Queued  int `json:"queued"`
+	Skipped int `json:"skipped"`
+}
+
+// DownloadEntries 异步入队下载:文件与目录同收(与 MoveEntries 同构)——
+// 文件平铺落 destDir,目录整棵子树按虚拟结构还原到 destDir/<目录名>/ 下
+// (空目录也建;pack 默认解压还原)。立即返回,进度经 transfer:update 事件推送。
+func (a *App) DownloadEntries(fileIDs, folderIDs []int64, destDir string) (p DownloadPlan, err error) {
 	defer a.panicGuard(&err)
-	if len(fileIDs) == 0 {
-		return 0, a.wrap(errs.New(errs.BadConfig, "未选择任何文件"))
+	if len(fileIDs) == 0 && len(folderIDs) == 0 {
+		return p, a.wrap(errs.New(errs.BadConfig, "未选择任何文件"))
 	}
 	if destDir == "" {
-		return 0, a.wrap(errs.New(errs.BadConfig, "未选择下载目录"))
+		return p, a.wrap(errs.New(errs.BadConfig, "未选择下载目录"))
 	}
 	if err := a.requireUnlocked(); err != nil {
-		return 0, a.wrap(err)
+		return p, a.wrap(err)
 	}
 	mgr, err := a.requireMgr()
 	if err != nil {
-		return 0, a.wrap(err)
+		return p, a.wrap(err)
 	}
-	n, err = mgr.DownloadTo(a.callCtx(), fileIDs, destDir)
+	queued, skipped, err := mgr.DownloadEntriesTo(a.callCtx(), fileIDs, folderIDs, destDir)
 	if err != nil {
-		return n, a.wrap(err)
+		return p, a.wrap(err)
 	}
-	return n, nil
+	return DownloadPlan{Queued: queued, Skipped: skipped}, nil
 }
 
 // CancelTransfer 取消一个传输;不存在或已结束返回 NOT_FOUND。

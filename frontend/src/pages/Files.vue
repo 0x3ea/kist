@@ -173,7 +173,7 @@ const ctxItems = computed<CtxItem[]>(() => {
       <button @click="onUpload('files')">上传文件</button>
       <button @click="onUpload('folder')">上传文件夹</button>
       <button @click="showNewFolder = true">新建文件夹</button>
-      <button :disabled="store.selection.size === 0" @click="downloadSelected">下载</button>
+      <button :disabled="selTotal === 0" title="文件与目录皆可;目录按虚拟结构整棵还原" @click="downloadSelected">下载</button>
       <button class="view" :title="store.view === 'grid' ? '切到列表' : '切到网格'" @click="store.view = store.view === 'grid' ? 'list' : 'grid'">
         {{ store.view === 'grid' ? '☰' : '▦' }}
       </button>

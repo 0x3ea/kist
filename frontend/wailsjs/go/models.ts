@@ -374,6 +374,20 @@ export namespace main {
 	        this.DriveCount = source["DriveCount"];
 	    }
 	}
+	export class DownloadPlan {
+	    queued: number;
+	    skipped: number;
+	
+	    static createFrom(source: any = {}) {
+	        return new DownloadPlan(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.queued = source["queued"];
+	        this.skipped = source["skipped"];
+	    }
+	}
 	export class DriveInfo {
 	    ID: string;
 	    Name: string;

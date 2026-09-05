@@ -55,7 +55,7 @@ const usageText = `用法:kistctl <子命令> [参数]
   mv      <路径|uuid|id...> <目标目录>    纯索引移动文件与目录,零远端流量(源:"/"开头为目录路径,其余文件 uuid|id;已在目标=空转)
   mkdir   /路径                          建虚拟目录(多级、幂等;纯索引零流量,先建目录再往里 put)
   rename  /路径 新名                     重命名目录(纯索引零流量;同名幂等,撞名报错)
-  get     <uuid|id> --to <目录> [--keep-zip] --pass-stdin  下载解密(文件夹条目还原成目录;--keep-zip 落 zip)
+  get     <uuid|id|/路径> --to <目录> [--keep-zip] --pass-stdin  下载解密(目录=整棵子树按结构还原,空目录也建;文件夹条目还原成目录;--keep-zip 落 zip)
   info    <uuid|id>                      查看明细(时间/备注/封面)
   note    <id> [--set 文本]              查看/设置备注
   rm      <id...>                        软删除文件
@@ -1338,7 +1338,7 @@ func cmdMv(args []string) error {
 	// 失败回退按目录路径(裸名如 `mv 作品A /合集` 也能用)
 	var fileIDs, folderIDs []int64
 	for _, t := range targets {
-		fileID, folderID, err := resolveEntryTarget(db, t)
+		fileID, folderID, err := resolveEntryTarget(db, t, "移动")
 		if err != nil {
 			return err
 		}
@@ -1370,15 +1370,15 @@ func cmdMv(args []string) error {
 	return nil
 }
 
-// resolveEntryTarget 把 mv 源解析成文件或目录其一:"/" 开头按目录虚拟路径
+// resolveEntryTarget 把源解析成文件或目录其一:"/" 开头按目录虚拟路径
 // (与 rename 的分派惯例一致);其余先按文件 uuid|id,失败回退按目录路径,
 // 裸名(如 `mv 作品A /合集`)也能用。返回 (fileID, folderID, err),
-// 命中的一方非 0。
-func resolveEntryTarget(db *index.DB, target string) (int64, int64, error) {
+// 命中的一方非 0。verb 用于错误文案(mv/get 各说各的动作)。
+func resolveEntryTarget(db *index.DB, target, verb string) (int64, int64, error) {
 	if !strings.HasPrefix(target, "/") {
 		if f, ferr := resolveTarget(db, target); ferr == nil {
 			if f.DeletedAt.Valid {
-				return 0, 0, errs.New(errs.BadConfig, target+" 已删除,不可移动")
+				return 0, 0, errs.New(errs.BadConfig, target+" 已删除,不可"+verb)
 			}
 			return f.ID, 0, nil
 		}
@@ -1388,7 +1388,7 @@ func resolveEntryTarget(db *index.DB, target string) (int64, int64, error) {
 		return 0, 0, err
 	}
 	if len(segs) == 0 {
-		return 0, 0, errs.New(errs.BadConfig, "根目录不可移动")
+		return 0, 0, errs.New(errs.BadConfig, "根目录不可"+verb)
 	}
 	id, err := db.ResolveFolderPath(segs)
 	if err != nil {
@@ -1421,9 +1421,10 @@ func cmdGet(args []string) error {
 	if err := parseArgs(fs, args); err != nil {
 		return err
 	}
-	if fs.NArg() == 0 {
-		return errs.New(errs.BadConfig, "get 需要 <uuid|id>")
+	if fs.NArg() != 1 {
+		return errs.New(errs.BadConfig, "get 需要 <uuid|id|/路径>(单个目标)")
 	}
+	target := fs.Arg(0)
 	pass, err := readPass(*passStdin)
 	if err != nil {
 		return err
@@ -1441,13 +1442,21 @@ func cmdGet(args []string) error {
 		return err
 	}
 	defer db.Close()
-	f, err := resolveTarget(db, fs.Arg(0))
+	// 根目录整树导出未做(TODO-05):显式拒绝并指路,不给"下了一个空目录"的错觉
+	if segs, perr := splitVirtualPath(target); perr == nil && len(segs) == 0 {
+		return errs.New(errs.BadConfig, "根目录不可整树下载(整树导出待做);请指定子目录")
+	}
+	// 文件与目录同收:文件=单条下载;目录=整棵子树按虚拟结构还原(空目录也建)
+	fileID, folderID, err := resolveEntryTarget(db, target, "下载")
 	if err != nil {
 		return err
 	}
-	if f.State == "uploading" {
-		return errs.New(errs.Locked,
-			"该文件待上传:先 kistctl outbox push(或手工搬运到远端后 outbox verify)")
+	if folderID == 0 {
+		// 待上传对象在入队前给指引性拒绝,而非传输列表里的失败疑云(TODO-13)
+		if f, gerr := db.GetFile(fileID); gerr == nil && f.State == "uploading" {
+			return errs.New(errs.Locked,
+				"该文件待上传:先 kistctl outbox push(或手工搬运到远端后 outbox verify)")
+		}
 	}
 	destDir, err := filepath.Abs(*to)
 	if err != nil {
@@ -1458,12 +1467,28 @@ func cmdGet(args []string) error {
 	if *keepZip {
 		dOpts = append(dOpts, transfer.DownloadOptions{KeepZip: true})
 	}
-	if _, err := m.DownloadTo(context.Background(), []int64{f.ID}, destDir, dOpts...); err != nil {
+	var fileIDs, folderIDs []int64
+	if folderID != 0 {
+		folderIDs = []int64{folderID}
+	} else {
+		fileIDs = []int64{fileID}
+	}
+	queued, skipped, err := m.DownloadEntriesTo(context.Background(), fileIDs, folderIDs, destDir, dOpts...)
+	if err != nil {
 		return err
 	}
-	fmt.Printf("下载到 %s\n", destDir)
+	if folderID != 0 {
+		msg := fmt.Sprintf("下载文件夹到 %s(%d 个条目", destDir, queued)
+		if skipped > 0 {
+			msg += fmt.Sprintf(";跳过 %d 个待上传", skipped)
+		}
+		fmt.Println(msg + ")")
+	} else {
+		fmt.Printf("下载到 %s\n", destDir)
+	}
 	fails, bytes := waitAndReport(m)
-	audit.Set(map[string]any{"id": fs.Arg(0), "to": destDir, "bytes": bytes})
+	audit.Set(map[string]any{"id": target, "to": destDir, "bytes": bytes,
+		"files": len(fileIDs), "folders": len(folderIDs), "skipped": skipped})
 	if fails > 0 {
 		return errs.New(errs.Internal, "下载失败或被取消")
 	}

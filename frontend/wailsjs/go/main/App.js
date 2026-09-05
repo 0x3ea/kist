@@ -26,8 +26,8 @@ export function DeleteEntries(arg1, arg2) {
   return window['go']['main']['App']['DeleteEntries'](arg1, arg2);
 }
 
-export function DownloadTo(arg1, arg2) {
-  return window['go']['main']['App']['DownloadTo'](arg1, arg2);
+export function DownloadEntries(arg1, arg2, arg3) {
+  return window['go']['main']['App']['DownloadEntries'](arg1, arg2, arg3);
 }
 
 export function EnsureFolder(arg1) {

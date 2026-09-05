@@ -18,7 +18,7 @@ export function DeleteDrive(arg1:string):Promise<void>;
 
 export function DeleteEntries(arg1:Array<number>,arg2:Array<number>):Promise<void>;
 
-export function DownloadTo(arg1:Array<number>,arg2:string):Promise<number>;
+export function DownloadEntries(arg1:Array<number>,arg2:Array<number>,arg3:string):Promise<main.DownloadPlan>;
 
 export function EnsureFolder(arg1:string):Promise<number>;
 
