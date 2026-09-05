@@ -1,24 +1,80 @@
 <script setup lang="ts">
-// DetailPanel.vue — 右侧详情:缩略图、虚拟路径、大小/密文、加密与上传时间、
-// sha256、备注编辑(保存调 SetNote)。目录不走此面板(元数据另走对话框)。
+// DetailPanel.vue — 右侧详情,文件与目录共用一个面板(交互约定:单击条目 =
+// 详情、双击目录 = 进入;目录的标签/封面引用等完整编辑仍走右键「元数据」
+// 对话框,面板只做速览 + 备注编辑):
+//   文件:缩略图、虚拟路径、大小/密文、加密与上传时间、sha256、备注编辑
+//   目录:封面(自定义引用 > 子条目宫格 > 图标)、tag、子树摘要、备注编辑
 // 面板常驻占位(v-if 在内容而非面板上):若选中才挂载,网格会因右栏突然
 // 出现而重排列数,卡片在点击瞬间变宽——点击目标漂移,观感突兀。
-import { ref, watch } from 'vue'
-import { store, saveNote } from '../store'
+import { computed, ref, watch } from 'vue'
+import { ensureThumb, saveFolderNote, saveNote, store } from '../store'
 import { fullTime, humanSize } from '../format'
-import { fileKind } from '../fileIcon'
+import { fileKind, folderKind } from '../fileIcon'
+import CoverMosaic from './CoverMosaic.vue'
 import { MousePointerClick } from 'lucide-vue-next'
 
 const noteDraft = ref('')
 const saving = ref(false)
 
+const fd = computed(() => store.folderDetail)
+
+// 文件与目录详情共用一份备注草稿:详情主体(文件 ID / 目录 ID,两侧互斥)
+// 切换时重置;Note 值也在监听列里——元数据对话框与面板备注保存都会回写
+// 详情快照,草稿要跟上,免得面板停留旧值、一保存又把新值顶回去
 watch(
-  () => store.detail?.ID,
-  () => (noteDraft.value = store.detail?.Note ?? ''),
+  () => [store.detail?.ID, store.detail?.Note, fd.value?.id, fd.value?.meta.Note] as const,
+  () => {
+    noteDraft.value = store.detail ? store.detail.Note : (fd.value?.meta.Note ?? '')
+  },
   { immediate: true },
 )
 
+// 目录封面:自定义引用(meta.CoverFileID)取字节满铺;派生宫格补预取——
+// 列表视图目录行不经过 CardGrid 的可见优先预取,面板里第一次看必须自己取;
+// ensureThumb 自带缓存/负缓存/限流,重复触发无代价
+const folderCoverURL = ref('')
+watch(
+  () => [fd.value?.id, fd.value?.meta.CoverFileID] as const,
+  async ([id, coverID]) => {
+    folderCoverURL.value = ''
+    if (!id) return
+    for (const cid of fd.value?.summary?.CoverFileIDs ?? []) if (cid) ensureThumb(cid)
+    if (!coverID) return
+    const url = await ensureThumb(coverID)
+    // 取图在途时详情可能已切走
+    if (fd.value?.id === id && fd.value.meta.CoverFileID === coverID) folderCoverURL.value = url
+  },
+  { immediate: true },
+)
+
+// 目录摘要行:话数/文件数与 CLI summaryLine 同措辞,pack 目录两者都给
+function scaleText(s: { PackCount: number; FileCount: number }): string {
+  if (s.PackCount > 0) return `${s.PackCount} 话 / ${s.FileCount} 文件`
+  if (s.FileCount > 0) return `${s.FileCount} 文件`
+  return '空目录'
+}
+
+const folderRows = computed(() => {
+  const rows: Array<[string, string]> = [['类型', '目录']]
+  const s = fd.value?.summary
+  if (s) {
+    rows.push(['规模', scaleText(s)])
+    if (s.TotalSize > 0) rows.push(['总大小', humanSize(s.TotalSize)])
+    if (s.LatestAt > 0) rows.push(['最近更新', fullTime(s.LatestAt)])
+    if (s.PendingCount > 0) rows.push(['待上传', `${s.PendingCount} 个(出站箱)`])
+  }
+  const coverID = fd.value?.meta.CoverFileID ?? 0
+  if (coverID > 0) rows.push(['封面引用', `文件 #${coverID}`])
+  return rows
+})
+
 async function onSaveNote() {
+  if (fd.value) {
+    saving.value = true
+    await saveFolderNote(fd.value.id, noteDraft.value)
+    saving.value = false
+    return
+  }
   if (!store.detail) return
   saving.value = true
   await saveNote(store.detail.ID, noteDraft.value)
@@ -28,11 +84,35 @@ async function onSaveNote() {
 
 <template>
   <aside class="panel">
-    <div v-if="!store.detail" class="empty">
+    <div v-if="!store.detail && !fd" class="empty">
       <MousePointerClick :size="28" :stroke-width="1.5" />
-      <p>点击文件查看详情</p>
+      <p>点击条目查看详情</p>
     </div>
-    <template v-else>
+    <template v-else-if="fd">
+      <div class="thumb">
+        <img v-if="folderCoverURL" :src="folderCoverURL" alt="" />
+        <CoverMosaic v-else-if="fd.summary?.CoverFileIDs?.length" :ids="fd.summary.CoverFileIDs" />
+        <component :is="folderKind.icon" v-else class="no-thumb" :size="56" :stroke-width="1.25" :color="folderKind.color" />
+      </div>
+      <h3 :title="fd.name">{{ fd.name }}</h3>
+      <p class="path">{{ fd.path }}</p>
+      <div v-if="fd.meta.Tags?.length" class="tags">
+        <span v-for="t in fd.meta.Tags" :key="t" class="tag">#{{ t }}</span>
+      </div>
+      <dl>
+        <template v-for="[k, v] in folderRows" :key="k">
+          <dt>{{ k }}</dt>
+          <dd>{{ v }}</dd>
+        </template>
+      </dl>
+      <label class="note">
+        备注(可搜索)
+        <textarea v-model="noteDraft" rows="3" />
+        <button :disabled="saving" @click="onSaveNote">保存备注</button>
+      </label>
+      <p class="hint">标签与封面引用:右键目录 →「元数据」</p>
+    </template>
+    <template v-else-if="store.detail">
     <div class="thumb">
       <img v-if="store.thumbs.get(store.detail.ID)" :src="store.thumbs.get(store.detail.ID)" alt="" />
       <component
@@ -184,5 +264,10 @@ dd {
 
 .note button {
   align-self: flex-start;
+}
+
+.hint {
+  color: var(--dim);
+  font-size: 12px;
 }
 </style>

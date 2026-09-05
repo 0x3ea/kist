@@ -17,6 +17,17 @@ export interface Toast {
   text: string
 }
 
+/** 右栏目录详情(单击目录行展示):name/path 是点击时刻从列表条目与面包屑
+ * 合成的快照;summary 复用列表已聚合的 FolderSummary(不重复建树);
+ * meta 来自 GetFolderMeta——取到后才一次性挂上面板,无待补齐中间态。 */
+export interface FolderDetail {
+  id: number
+  name: string
+  path: string
+  meta: index.FolderMeta
+  summary: index.FolderSummary | null
+}
+
 let toastSeq = 0
 let searchTimer: ReturnType<typeof setTimeout> | null = null
 
@@ -126,6 +137,7 @@ export const store = reactive({
   selection: new Set<number>(), // 选中的文件 id
   folderSelection: new Set<number>(), // 选中的目录 id
   detail: null as main.FileDetail | null,
+  folderDetail: null as FolderDetail | null, // 右栏目录详情(单击目录行)
   search: { active: false, query: '', folders: [] as index.FolderHit[], files: [] as index.FileHit[] },
 
   // Transfers 页
@@ -195,6 +207,7 @@ export async function init() {
     // 换库(TODO-21):管线已随库重建,本地缓存全部作废——回根目录清状态。
     // driveSwitchSeq 通知 Files 页清搜索框(搜索词是页面本地状态)。
     store.detail = null
+    store.folderDetail = null
     store.selection.clear()
     store.folderSelection.clear()
     store.thumbs.clear()
@@ -320,6 +333,7 @@ export async function lock() {
   try {
     await API.Lock()
     store.detail = null
+    store.folderDetail = null
     store.selection.clear()
     store.folderSelection.clear()
   } catch (e) {
@@ -420,15 +434,24 @@ export async function activateDrive(id: string): Promise<boolean> {
 export async function loadFolder(id: number) {
   try {
     const v = await API.ListFolder(id)
+    const entries = v.Entries ?? []
+    const fileIDs = new Set(entries.filter((e) => !e.IsFolder).map((e) => e.ID))
+    const folderIDs = new Set(entries.filter((e) => e.IsFolder).map((e) => e.ID))
     store.folder.id = id
     store.folder.crumbs = v.Crumbs ?? []
-    store.folder.entries = v.Entries ?? []
+    store.folder.entries = entries
     store.folder.summaries = v.Summaries ?? {}
-    store.selection.clear()
-    store.folderSelection.clear()
-    // 换目录即离开原选中文件:详情面板一并收起,否则面板停留在
-    // 不属于当前目录的旧条目上(与上面两个选中集清空同理)
-    store.detail = null
+    // 选中与面板快照按"条目仍在当前列表"修剪,而非无条件清空:
+    // 换目录时旧条目必不在新列表 → 等价清空(文件/目录 id 是两张表各自
+    // 自增,数值可撞,必须按 IsFolder 分侧比对);同目录刷新(index:changed)
+    // 则保留幸存者——否则右栏备注一保存就被刷新事件收起,选区也被抹掉。
+    for (const fid of store.selection) if (!fileIDs.has(fid)) store.selection.delete(fid)
+    for (const fid of store.folderSelection) if (!folderIDs.has(fid)) store.folderSelection.delete(fid)
+    if (store.detail && !fileIDs.has(store.detail.ID)) store.detail = null
+    if (store.folderDetail && !folderIDs.has(store.folderDetail.id)) store.folderDetail = null
+    else if (store.folderDetail)
+      // 面板里的目录还在:摘要换成本轮重算的(封面链/待传数等随索引变化)
+      store.folderDetail.summary = store.folder.summaries[String(store.folderDetail.id)] ?? null
   } catch (e) {
     fail(e)
   }
@@ -547,10 +570,56 @@ export function exitSearch() {
 
 export async function openDetail(fileID: number) {
   try {
+    store.folderDetail = null // 文件/目录详情互斥:打开一侧收起另一侧
     store.detail = await API.FileInfo(fileID)
     if (store.detail?.HasThumb) ensureThumb(fileID)
   } catch (e) {
     fail(e)
+  }
+}
+
+/** 单击目录行:右栏展示目录元数据(交互约定:单击 = 详情、双击 = 进入)。
+ * name/path 由当前列表条目与面包屑合成,summary 复用列表聚合结果;先取
+ * GetFolderMeta 再一次性挂上(面板无"待补齐"中间态)。文件/目录详情互斥:
+ * 打开一侧即收起另一侧。 */
+let folderDetailSeq = 0
+export async function openFolderDetail(folderID: number): Promise<boolean> {
+  // 目录必须还在当前列表(250ms 单击判定窗口内可能已切目录):条目不在
+  // (换目录/已删)则静默放弃——面板数据要从条目与面包屑合成快照
+  const entry = store.folder.entries.find((e) => e.IsFolder && e.ID === folderID)
+  if (!entry) return false
+  const seq = ++folderDetailSeq
+  try {
+    const meta = await API.GetFolderMeta(folderID)
+    if (seq !== folderDetailSeq) return true // 在途期间又点了别的目录:本结果作废
+    const base = store.folder.crumbs.slice(1).map((c) => c.Name).join('/')
+    store.detail = null
+    store.folderDetail = {
+      id: folderID,
+      name: entry.Name,
+      path: `${base ? '/' + base : ''}/${entry.Name}`,
+      meta,
+      summary: store.folder.summaries[String(folderID)] ?? null,
+    }
+    return true
+  } catch (e) {
+    fail(e)
+    return false
+  }
+}
+
+/** 右栏目录备注保存:只动 Note 一项(FolderMetaUpdate 其余字段留 nil = 不动),
+ * 成功后就地更新面板快照——列表刷新由后端 index:changed 事件负责 */
+export async function saveFolderNote(folderID: number, note: string): Promise<boolean> {
+  const u = new index.FolderMetaUpdate()
+  u.Note = note
+  try {
+    await API.UpdateFolderMeta(folderID, u)
+    if (store.folderDetail?.id === folderID) store.folderDetail.meta.Note = note
+    return true
+  } catch (e) {
+    fail(e)
+    return false
   }
 }
 
@@ -572,6 +641,7 @@ export async function deleteEntries(): Promise<boolean> {
   try {
     await API.DeleteEntries(files, folders)
     store.detail = null
+    store.folderDetail = null
     toast('info', `已删除 ${files.length} 个文件、${folders.length} 个目录(远端占位由孤儿清理回收)`)
     return true
   } catch (e) {
@@ -638,6 +708,12 @@ export async function createFolder(name: string): Promise<boolean> {
 export async function renameFolder(folderID: number, name: string): Promise<boolean> {
   try {
     await API.RenameFolder(folderID, name)
+    // 右栏目录详情若正展示该目录,同步改名(path 只换最后一段)
+    const d = store.folderDetail
+    if (d?.id === folderID) {
+      d.name = name
+      d.path = d.path.slice(0, d.path.lastIndexOf('/') + 1) + name
+    }
     toast('info', '已重命名')
     return true
   } catch (e) {
@@ -697,6 +773,11 @@ export async function getFileMeta(fileID: number): Promise<index.FileMeta | null
 export async function saveFileMeta(fileID: number, u: index.FileMetaUpdate): Promise<boolean> {
   try {
     await API.UpdateFileMeta(fileID, u)
+    // 详情面板若开着就同步改过的字段(nil = 未动),免得面板停留旧值
+    if (store.detail?.ID === fileID) {
+      if (u.Note !== undefined) store.detail.Note = u.Note
+      if (u.Tags !== undefined) store.detail.Tags = u.Tags
+    }
     toast('info', '文件元数据已保存')
     return true
   } catch (e) {

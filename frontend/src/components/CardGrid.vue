@@ -5,13 +5,13 @@
 // TODO-10 出库后封面可能走网络:全量预取改为 IntersectionObserver 可见优先
 // (rootMargin 提前 200px ≈ 预取一屏),实际并发由 store 的有界队列限制。
 import { index } from '../../wailsjs/go/models'
-import { store, ensureThumb, openDetail, summaryText } from '../store'
+import { store, ensureThumb, openDetail, openFolderDetail, summaryText } from '../store'
 import { humanSize } from '../format'
 import { fileKind } from '../fileIcon'
 import CoverMosaic from './CoverMosaic.vue'
 import { onBeforeUnmount, onMounted } from 'vue'
 
-defineEmits<{ open: [id: number]; menu: [e: MouseEvent, entry: index.Entry] }>()
+const emit = defineEmits<{ open: [id: number]; menu: [e: MouseEvent, entry: index.Entry] }>()
 
 let io: IntersectionObserver | null = null
 const pendingFetch = new Map<Element, () => void>()
@@ -64,6 +64,35 @@ function cardClick(e: index.Entry) {
   toggleFile(e.ID)
   openDetail(e.ID)
 }
+
+// 目录单击/双击(与列表视图同款约定):单击 = 唯一选中 + 右栏元数据,
+// 双击 = 进入。双击前必先落一次 click:第一击挂 250ms 判定,窗口内的第二击
+// 取消判定并交由 dblclick——否则每次双击都会先闪一次面板再导航。
+// 判定到点后目录已不在当前列表(切目录/已删)时 openFolderDetail 自会放弃。
+let folderClickTimer: ReturnType<typeof setTimeout> | null = null
+
+function folderClick(id: number) {
+  if (folderClickTimer) {
+    clearTimeout(folderClickTimer)
+    folderClickTimer = null
+    return // 双击的第二击:让位 dblclick
+  }
+  folderClickTimer = setTimeout(() => {
+    folderClickTimer = null
+    store.selection.clear()
+    store.folderSelection.clear()
+    store.folderSelection.add(id)
+    openFolderDetail(id)
+  }, 250)
+}
+
+function folderDblClick(id: number) {
+  if (folderClickTimer) {
+    clearTimeout(folderClickTimer)
+    folderClickTimer = null
+  }
+  emit('open', id)
+}
 </script>
 
 <template>
@@ -74,7 +103,8 @@ function cardClick(e: index.Entry) {
       :ref="registerCard(e)"
       class="card"
       :class="{ sel: e.IsFolder ? store.folderSelection.has(e.ID) : store.selection.has(e.ID) }"
-      @click="e.IsFolder ? $emit('open', e.ID) : cardClick(e)"
+      @click="e.IsFolder ? folderClick(e.ID) : cardClick(e)"
+      @dblclick="e.IsFolder && folderDblClick(e.ID)"
       @contextmenu.prevent="$emit('menu', $event, e)"
     >
       <span

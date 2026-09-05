@@ -2,7 +2,8 @@
 // Files.vue — 主浏览页:搜索框(300ms 防抖,文件名/备注/目录名/标签)、工具栏
 // (上传文件/文件夹、新建文件夹、下载、视图切换;操作类入口已收进右键菜单,
 // 见 TODO-20)、面包屑、列表/网格双视图、右侧详情面板。
-// 目录进入 = loadFolder;搜索态点击目录 = 跳进该目录。
+// 条目单击 = 右栏详情/元数据,目录双击 = 进入(loadFolder);搜索态点击
+// 目录 = 直接跳进该目录(搜索结果行内已带 note/tag,不做双击)。
 import { computed, ref, watch } from 'vue'
 import { index } from '../../wailsjs/go/models'
 import {

@@ -11,6 +11,7 @@ import {
   ensureThumb,
   getFileMeta,
   getFolderMeta,
+  openFolderDetail,
   pickImageFile,
   saveFileMeta,
   saveFolderMeta,
@@ -78,7 +79,11 @@ async function onSave() {
     busy.value = true
     const ok = await saveFolderMeta(props.id, upd)
     busy.value = false
-    if (ok) emit('close')
+    if (ok) {
+      // 右栏目录详情若正展示该目录,重拉快照,面板与保存结果保持一致
+      if (store.folderDetail?.id === props.id) openFolderDetail(props.id)
+      emit('close')
+    }
     return
   }
   const upd = new index.FileMetaUpdate()

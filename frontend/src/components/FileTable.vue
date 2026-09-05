@@ -1,12 +1,14 @@
 <script setup lang="ts">
 // FileTable.vue — 列表视图:目录行显示子树摘要(CLI ls 同款),文件行显示
 // 大小/时间/状态;类型列用共享 fileKind 图标,uploading 标"待上传"。
+// 目录行交互:单击 = 唯一选中 + 右栏元数据,双击 = 进入(名称链接保留为
+// 即时进入的捷径);文件行单击 = 切换选中 + 右栏详情,与原先一致。
 import { index } from '../../wailsjs/go/models'
-import { store, summaryText, openDetail } from '../store'
+import { store, summaryText, openDetail, openFolderDetail } from '../store'
 import { humanSize, shortTime } from '../format'
 import { fileKind, folderKind } from '../fileIcon'
 
-defineEmits<{ open: [id: number]; menu: [e: MouseEvent, entry: index.Entry] }>()
+const emit = defineEmits<{ open: [id: number]; menu: [e: MouseEvent, entry: index.Entry] }>()
 
 function toggleFile(id: number) {
   store.selection.has(id) ? store.selection.delete(id) : store.selection.add(id)
@@ -21,6 +23,35 @@ function onRowClick(e: index.Entry) {
   if (e.IsFolder) return
   toggleFile(e.ID)
   openDetail(e.ID)
+}
+
+// 目录单击/双击:双击前必先落一次 click——第一击挂 250ms 判定,窗口内的
+// 第二击取消判定并交由 dblclick 进入目录,否则每次双击都会先闪一次面板。
+// 判定到点后目录已不在当前列表(切目录/已删)时 openFolderDetail 自会放弃。
+let folderClickTimer: ReturnType<typeof setTimeout> | null = null
+
+function folderClick(id: number) {
+  if (folderClickTimer) {
+    clearTimeout(folderClickTimer)
+    folderClickTimer = null
+    return // 双击的第二击:让位 dblclick
+  }
+  folderClickTimer = setTimeout(() => {
+    folderClickTimer = null
+    // 单击 = 唯一选中(多选走勾选框,与右键菜单同语义),右栏展示元数据
+    store.selection.clear()
+    store.folderSelection.clear()
+    store.folderSelection.add(id)
+    openFolderDetail(id)
+  }, 250)
+}
+
+function folderDblClick(id: number) {
+  if (folderClickTimer) {
+    clearTimeout(folderClickTimer)
+    folderClickTimer = null
+  }
+  emit('open', id)
 }
 
 function stateTag(e: index.Entry): string {
@@ -46,7 +77,8 @@ function stateTag(e: index.Entry): string {
         v-for="e in store.folder.entries"
         :key="e.ID"
         :class="{ sel: e.IsFolder ? store.folderSelection.has(e.ID) : store.selection.has(e.ID) }"
-        @click="e.IsFolder ? null : onRowClick(e)"
+        @click="e.IsFolder ? folderClick(e.ID) : onRowClick(e)"
+        @dblclick="e.IsFolder && folderDblClick(e.ID)"
         @contextmenu.prevent="$emit('menu', $event, e)"
       >
         <td class="c-check" @click.stop>
