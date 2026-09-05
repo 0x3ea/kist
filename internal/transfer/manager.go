@@ -225,7 +225,13 @@ func (m *Manager) expandFolder(ctx context.Context, p string, destFolderID int64
 			return fs.SkipDir
 		}
 		rel, err := filepath.Rel(p, fp)
-		if err != nil || rel == "." {
+		if err != nil {
+			return err
+		}
+		if rel == "." {
+			// 根目录自身也要入清单:叶子目录(无子目录)时没有更深的目录
+			// 会连带建出它,漏掉会让根下文件拿到零值 folderID 撞外键
+			dirs = append(dirs, []string{base})
 			return nil
 		}
 		dirs = append(dirs, append([]string{base}, splitSegments(rel)...))
