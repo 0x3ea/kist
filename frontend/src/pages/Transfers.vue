@@ -3,17 +3,13 @@
 // (transfers:changed 全量 / transfer:update 增量),初始 Transfers() 拉快照。
 import { computed, ref } from 'vue'
 import { store, cancelTransfer } from '../store'
-import { humanSize, phaseText } from '../format'
+import { humanSize, phaseText, isRunningPhase as running } from '../format'
 
 const hideDone = ref(true)
 
 function pct(t: { bytesDone: number; bytesTotal: number }): number {
   if (t.bytesTotal <= 0) return 0
   return Math.min(100, Math.round((t.bytesDone / t.bytesTotal) * 100))
-}
-
-function running(p: string): boolean {
-  return ['queued', 'encrypting', 'uploading', 'downloading', 'decrypting'].includes(p)
 }
 
 const list = computed(() =>

@@ -44,3 +44,10 @@ export const PHASE_TEXT: Record<string, string> = {
 export function phaseText(p: string): string {
   return PHASE_TEXT[p] ?? p
 }
+
+/** 未到终态的阶段集合——侧栏徽标与传输页的"进行中"判定共用 */
+const RUNNING_PHASES = new Set(['queued', 'encrypting', 'uploading', 'downloading', 'decrypting'])
+
+export function isRunningPhase(p: string): boolean {
+  return RUNNING_PHASES.has(p)
+}

@@ -2,8 +2,9 @@
 // App.vue — 外壳:未解锁时 Lock 全屏覆盖;解锁后左侧栏导航三页切换。
 // 底部 tab 是移动端形态,桌面窗口改侧栏(品牌 + 导航 + 网盘名/锁定)。
 // 页面状态驻 store,KeepAlive 保证切页不丢(Files 的浏览位置/选择集)。
-import { onMounted, watch } from 'vue'
+import { computed, onMounted, watch } from 'vue'
 import { store, init, loadFolder, lock } from './store'
+import { isRunningPhase } from './format'
 import { ArrowLeftRight, Box, FolderOpen, Lock, Settings as SettingsIcon } from 'lucide-vue-next'
 import LockPage from './pages/Lock.vue'
 import Files from './pages/Files.vue'
@@ -30,6 +31,10 @@ const navItems = [
   { page: 'transfers', label: '传输', icon: ArrowLeftRight },
   { page: 'settings', label: '设置', icon: SettingsIcon },
 ] as const
+
+// 侧栏徽标:正在传输的数量(与传输页同口径的"进行中"阶段),
+// store.transfers 由 transfer:update/transfers:changed 事件实时驱动
+const activeTransfers = computed(() => store.transfers.filter((t) => isRunningPhase(t.phase)).length)
 </script>
 
 <template>
@@ -49,7 +54,7 @@ const navItems = [
           >
             <component :is="p.icon" :size="16" />
             <span>{{ p.label }}</span>
-            <em v-if="p.page === 'files' && store.state.FileCount" class="badge">{{ store.state.FileCount }}</em>
+            <em v-if="p.page === 'transfers' && activeTransfers" class="badge">{{ activeTransfers }}</em>
           </button>
         </nav>
         <div class="foot">
