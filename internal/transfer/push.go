@@ -22,9 +22,10 @@ func OutboxArtifactPath(blobName string) string {
 	return filepath.Join(config.OutboxDir(), blobName)
 }
 
-// PushPending 把待上传文件与封面(TODO-10)入队为 push 任务(产物缺失者
-// 跳过,留给 verify/list 报告);返回入队数。
-func (m *Manager) PushPending(ctx context.Context, files []index.FileRow, covers []index.CoverRow) int {
+// PushPending 把待上传文件与封面(TODO-10 文件侧,v6 目录侧)入队为 push
+// 任务(产物缺失者跳过,留给 verify/list 报告);返回入队数。
+func (m *Manager) PushPending(ctx context.Context, files []index.FileRow, covers []index.CoverRow,
+	folderCovers []index.FolderCoverRow) int {
 	queued := 0
 	for _, f := range files {
 		if _, err := os.Stat(OutboxArtifactPath(f.BlobName)); err != nil {
@@ -50,16 +51,30 @@ func (m *Manager) PushPending(ctx context.Context, files []index.FileRow, covers
 		m.add(j)
 		queued++
 	}
+	for _, c := range folderCovers {
+		if _, err := os.Stat(OutboxArtifactPath(c.BlobName)); err != nil {
+			continue
+		}
+		jctx, cancel := context.WithCancel(ctx)
+		id := newHexID()
+		j := &job{ctx: jctx, cancel: cancel, folderCover: &c}
+		j.tr = &Transfer{ID: id, Kind: "push", Name: "目录封面", Phase: PhaseQueued,
+			BytesTotal: c.Size, StartedAt: time.Now().Unix()}
+		m.add(j)
+		queued++
+	}
 	return queued
 }
 
 // pushItem 归一 push 任务的账目两侧差异:文件账与封面账(TODO-10)只在
-// 远端命名空间、期望密文大小与 emit 的 fileID 上不同。
+// 远端命名空间、期望密文大小与 emit 的属主 id 上不同;目录封面账与文件
+// 封面账连命名空间都相同,只有 emit 载荷(fileID/folderID)不同。
 type pushItem struct {
 	blobName string
 	size     int64
 	isCover  bool
-	fileID   int64 // index:changed 事件用
+	fileID   int64 // index:changed 事件用(文件与文件封面账)
+	folderID int64 // index:changed 事件用(目录封面账)
 }
 
 // runPush 单个产物重传:PUT(按 kind 分命名空间)→ MarkUploaded → 删产物。
@@ -67,9 +82,11 @@ type pushItem struct {
 // discard 整笔回滚(索引行 + 产物一起删,干净失败;文件账连其封面账一起)。
 func (m *Manager) runPush(j *job) error {
 	ctx, tr := j.ctx, j.tr
-	it := pushItem{isCover: j.cover != nil}
-	if it.isCover {
+	it := pushItem{isCover: j.cover != nil || j.folderCover != nil}
+	if j.cover != nil {
 		it.blobName, it.size, it.fileID = j.cover.BlobName, j.cover.Size, j.cover.FileID
+	} else if j.folderCover != nil {
+		it.blobName, it.size, it.folderID = j.folderCover.BlobName, j.folderCover.Size, j.folderCover.FolderID
 	} else {
 		it.blobName, it.size, it.fileID = j.file.BlobName, j.file.CipherSize, j.file.ID
 	}
@@ -120,7 +137,13 @@ func (m *Manager) runPush(j *job) error {
 	if err := os.Remove(artifact); err != nil && !os.IsNotExist(err) {
 		slog.Warn("清理出站箱产物失败", "blob", it.blobName, "err", err)
 	}
-	m.emit("index:changed", map[string]any{"reason": "push", "fileID": it.fileID})
+	// push 收账翻 ready:列表刷新由通用的 index:changed 驱动(载荷只带属主
+	// id 供壳层定位,目录封面账给 folderID)
+	if it.folderID != 0 {
+		m.emit("index:changed", map[string]any{"reason": "push", "folderID": it.folderID})
+	} else {
+		m.emit("index:changed", map[string]any{"reason": "push", "fileID": it.fileID})
+	}
 	return nil
 }
 
@@ -138,14 +161,18 @@ type VerifyResult struct {
 // RunOutboxVerify 对全部待上传对象收账(TODO-11 的 O(1) Probe,万级也廉价):
 // 远端已有且大小相符 → 转 ready 并删本地产物;大小不符 → 拒绝收账(疑似
 // 手工传输不完整);顺带清理无主产物(索引行已删/软删的遗留文件)。
-// 挂账集 = 文件 ∪ 封面(TODO-10):封面产物若不进挂账集,会被下面的
-// 无主清理当成无主文件误删——封面与文件同进退。
+// 挂账集 = 文件 ∪ 封面(文件侧 TODO-10,目录侧 v6):封面产物若不进挂账集,
+// 会被下面的无主清理当成无主文件误删——封面与属主同进退。
 func RunOutboxVerify(ctx context.Context, store *remote.Store, db *index.DB) ([]VerifyResult, error) {
 	files, err := db.ListUploading()
 	if err != nil {
 		return nil, err
 	}
 	covers, err := db.ListUploadingCovers()
+	if err != nil {
+		return nil, err
+	}
+	folderCovers, err := db.ListUploadingFolderCovers()
 	if err != nil {
 		return nil, err
 	}
@@ -159,6 +186,13 @@ func RunOutboxVerify(ctx context.Context, store *remote.Store, db *index.DB) ([]
 		}
 	}
 	for _, c := range covers {
+		pending[c.BlobName] = true
+		out, err = verifyOne(ctx, store, db, c.BlobName, c.Size, true, out)
+		if err != nil {
+			return out, err
+		}
+	}
+	for _, c := range folderCovers {
 		pending[c.BlobName] = true
 		out, err = verifyOne(ctx, store, db, c.BlobName, c.Size, true, out)
 		if err != nil {

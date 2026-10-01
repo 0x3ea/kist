@@ -356,38 +356,57 @@ func (db *DB) SoftDeleteFolders(ids []int64) error {
 	})
 }
 
-// ---- 目录元数据(TODO-16)----
+// ---- 目录元数据(TODO-16;封面 v6 起独立为 folder_covers,不经本结构)----
 
 // FolderMeta 是目录的用户元数据:缺席不降级,只影响检索与展示。
 // 元数据三不原则:不继承、不合并、无告警——父子各自持有、互不感知。
+// 封面不在其列:目录封面是持有式 blob 引用(folder_covers 表),
+// 读写走 cover 侧接口,与 note/tag 的纯索引更新是两条管线。
 type FolderMeta struct {
-	Note        string   // 备注,参与搜索
-	UserMeta    string   // 用户自定义 JSON(扩展位,本层只存取)
-	CoverFileID int64    // 自定义封面指向的 files.id;0 = 未指定(走派生/默认级)
-	Tags        []string // 无序去重;空切片 = 无 tag
+	Note     string   // 备注,参与搜索
+	UserMeta string   // 用户自定义 JSON(扩展位,本层只存取)
+	Tags     []string // 无序去重;空切片 = 无 tag
 }
 
 // FolderMetaUpdate 是元数据的增量写请求:指针为 nil 表示该项不动,
 // 指向零值表示清除——一个事务内原子生效,全部成功才计一次 revision。
 type FolderMetaUpdate struct {
-	Note  *string
-	Cover *int64
-	Tags  []string // 非 nil 即全量覆盖(nil = 不动,空切片 = 清空)
+	Note *string
+	Tags []string // 非 nil 即全量覆盖(nil = 不动,空切片 = 清空)
+}
+
+// FolderRow 是目录行的最小投影(GUI 目录封面操作的属主校验与缓存键用:
+// uuid 是 covercache 的键,数字 id 多盘共库会撞)。
+type FolderRow struct {
+	ID        int64
+	UUID      string
+	Name      string
+	DeletedAt sql.NullInt64
+}
+
+// GetFolder 取目录行;不存在时报错(含已软删,由调用方按 DeletedAt 分诊)。
+func (db *DB) GetFolder(folderID int64) (FolderRow, error) {
+	var f FolderRow
+	err := db.QueryRow(
+		`SELECT id, uuid, name, deleted_at FROM folders WHERE id = ?`, folderID).
+		Scan(&f.ID, &f.UUID, &f.Name, &f.DeletedAt)
+	if err != nil {
+		return f, fmt.Errorf("index: 目录 %d 不存在: %w", folderID, err)
+	}
+	return f, nil
 }
 
 // GetFolderMeta 读目录元数据;目录不存在或已软删时报错。
 func (db *DB) GetFolderMeta(folderID int64) (FolderMeta, error) {
 	var m FolderMeta
 	var note, userMeta sql.NullString
-	var cover sql.NullInt64
 	err := db.QueryRow(
-		`SELECT note, user_meta, cover_file_id FROM folders WHERE id = ? AND deleted_at IS NULL`,
-		folderID).Scan(&note, &userMeta, &cover)
+		`SELECT note, user_meta FROM folders WHERE id = ? AND deleted_at IS NULL`,
+		folderID).Scan(&note, &userMeta)
 	if err != nil {
 		return m, fmt.Errorf("index: 目录 %d 不存在: %w", folderID, err)
 	}
 	m.Note, m.UserMeta = note.String, userMeta.String
-	m.CoverFileID = cover.Int64
 
 	rows, err := db.Query(
 		`SELECT t.name FROM folder_tags ft JOIN tags t ON t.id = ft.tag_id
@@ -419,16 +438,6 @@ func (db *DB) UpdateFolderMeta(folderID int64, u FolderMetaUpdate) error {
 		}
 		if u.Note != nil {
 			if _, err := tx.Exec(`UPDATE folders SET note = ? WHERE id = ?`, *u.Note, folderID); err != nil {
-				return err
-			}
-		}
-		if u.Cover != nil {
-			// Cover 指向 0 = 清除引用。列带 REFERENCES files(id),不存在
-			// id=0 的行,直接写 0 会触发外键失败(Phase 7 绑定层测试发现,
-			// CLI `meta set --cover 0` 同样踩雷)——清除必须落 NULL。
-			v := sql.NullInt64{Int64: *u.Cover, Valid: *u.Cover != 0}
-			if _, err := tx.Exec(
-				`UPDATE folders SET cover_file_id = ? WHERE id = ?`, v, folderID); err != nil {
 				return err
 			}
 		}

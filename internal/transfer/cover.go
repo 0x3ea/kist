@@ -59,12 +59,48 @@ func (m *Manager) encryptCoverArtifact(mk crypto.MasterKey, td ThumbData, tmpDir
 	return &coverOut{name: name, size: st.Size(), path: p, td: td}, nil
 }
 
-// ImportCover 把 GUI 导入的封面出库(用户编辑,与 SetNote 同级计 revision):
-// 加密 → PUT covers 命名空间 → 同事务写引用(custom/ready,旧引用 blob 同
-// 事务 trash)。远端不可达时回退出站箱(引用 uploading 不可见、产物待
-// push/verify 收账),返回 deferred=true 供壳层提示——用户内容绝不静默丢弃。
-// f 是封面所属文件行(须未软删,调用方校验)。
+// ImportCover 把 GUI 导入的文件封面出库(用户编辑,与 SetNote 同级计 revision)。
+// f 是封面所属文件行(须未软删,调用方校验)。管线与语义见 importCover。
 func (m *Manager) ImportCover(ctx context.Context, f index.FileRow, td ThumbData) (deferred bool, err error) {
+	deferred, err = m.importCover(ctx, td, func(tx *sql.Tx, blobName string, size int64, state string) (string, error) {
+		return m.deps.DB.PutCover(tx, index.CoverRow{
+			FileID: f.ID, BlobName: blobName, Size: size,
+			Width: td.W, Height: td.H, Mime: td.Mime,
+			Source: index.CoverCustom, State: state, CreatedAt: time.Now().Unix(),
+		})
+	}, f.Name)
+	if deferred {
+		m.emit("index:changed", map[string]any{"reason": "cover-defer", "fileID": f.ID})
+	}
+	return deferred, err
+}
+
+// ImportFolderCover 把 GUI 导入的目录封面出库,属主从文件换成目录
+// (v6 起目录封面持有式,不再引用库内文件)。folder 须未软删,调用方校验。
+func (m *Manager) ImportFolderCover(ctx context.Context, folder index.FolderRow, td ThumbData) (deferred bool, err error) {
+	deferred, err = m.importCover(ctx, td, func(tx *sql.Tx, blobName string, size int64, state string) (string, error) {
+		return m.deps.DB.PutFolderCover(tx, index.FolderCoverRow{
+			FolderID: folder.ID, BlobName: blobName, Size: size,
+			Width: td.W, Height: td.H, Mime: td.Mime,
+			Source: index.CoverCustom, State: state, CreatedAt: time.Now().Unix(),
+		})
+	}, folder.Name)
+	if deferred {
+		m.emit("index:changed", map[string]any{"reason": "cover-defer", "folderID": folder.ID})
+	}
+	return deferred, err
+}
+
+// importCover 是文件/目录封面导入的共用核心(用户编辑,与 SetNote 同级计
+// revision):加密 → PUT covers 命名空间 → 同事务写引用(custom,旧引用
+// blob 同事务 trash)。远端不可达时回退出站箱(引用 uploading 不可见、
+// 产物待 push/verify 收账),返回 deferred=true 供壳层提示——用户内容
+// 绝不静默丢弃。put 闭包只负责"往哪张表写引用"(covers/folder_covers),
+// blob 身份与闭环记账在核心统一完成;ownerName 仅用于日志。
+func (m *Manager) importCover(ctx context.Context, td ThumbData,
+	put func(tx *sql.Tx, blobName string, size int64, state string) (prevBlob string, err error),
+	ownerName string) (deferred bool, err error) {
+
 	mk, ok := m.deps.MK()
 	if !ok {
 		return false, errsLocked()
@@ -79,12 +115,6 @@ func (m *Manager) ImportCover(ctx context.Context, f index.FileRow, td ThumbData
 		return false, err
 	}
 
-	newRow := index.CoverRow{
-		FileID: f.ID, BlobName: cover.name, Size: cover.size,
-		Width: td.W, Height: td.H, Mime: td.Mime,
-		Source: index.CoverCustom, CreatedAt: time.Now().Unix(),
-	}
-
 	cf, err := os.Open(cover.path)
 	if err != nil {
 		return false, err
@@ -94,8 +124,7 @@ func (m *Manager) ImportCover(ctx context.Context, f index.FileRow, td ThumbData
 	if perr == nil {
 		// 先字节后引用:PUT 成功才写 ready 引用
 		if err := m.deps.DB.WithTx(func(tx *sql.Tx) error {
-			newRow.State = index.CoverReady
-			prev, err := m.deps.DB.PutCover(tx, newRow)
+			prev, err := put(tx, cover.name, cover.size, index.CoverReady)
 			if err != nil {
 				return err
 			}
@@ -105,7 +134,7 @@ func (m *Manager) ImportCover(ctx context.Context, f index.FileRow, td ThumbData
 			return m.deps.DB.RegisterBlob(tx, cover.name, "cover", cover.size)
 		}); err != nil {
 			// 引用写入失败:封面 blob 已成孤儿,gc 处置(与文件上传同款语义)
-			slog.Warn("封面引用写入失败,远端 blob 已成孤儿", "cover", cover.name, "file", f.Name, "err", err)
+			slog.Warn("封面引用写入失败,远端 blob 已成孤儿", "cover", cover.name, "owner", ownerName, "err", err)
 			return false, err
 		}
 		return false, nil
@@ -114,8 +143,7 @@ func (m *Manager) ImportCover(ctx context.Context, f index.FileRow, td ThumbData
 	// 远端不可达:回退出站箱。引用 uploading(不可见),产物待运,
 	// push/verify 收账翻 ready——弱网用户的自定义封面不因一次断网丢失。
 	if err := m.deps.DB.WithTx(func(tx *sql.Tx) error {
-		newRow.State = index.CoverUploading
-		prev, err := m.deps.DB.PutCover(tx, newRow)
+		prev, err := put(tx, cover.name, cover.size, index.CoverUploading)
 		if err != nil {
 			return err
 		}
@@ -129,7 +157,6 @@ func (m *Manager) ImportCover(ctx context.Context, f index.FileRow, td ThumbData
 	if err := moveArtifact(cover.path, config.OutboxDir(), cover.name); err != nil {
 		return false, err
 	}
-	m.emit("index:changed", map[string]any{"reason": "cover-defer", "fileID": f.ID})
 	return true, nil
 }
 
@@ -148,5 +175,22 @@ func (m *Manager) ClearCoverFile(fileID int64) error {
 		return err
 	}
 	m.emit("index:changed", map[string]any{"reason": "cover-clear", "fileID": fileID})
+	return nil
+}
+
+// ClearFolderCover 清除目录封面,语义与 ClearCoverFile 逐句相同(持有式:
+// 删引用行 + 旧 blob 同事务 trash,物理删除交给 gc;挂账中的同样可弃)。
+func (m *Manager) ClearFolderCover(folderID int64) error {
+	err := m.deps.DB.WithTx(func(tx *sql.Tx) error {
+		prev, err := m.deps.DB.ClearFolderCover(tx, folderID)
+		if err != nil {
+			return err
+		}
+		return m.deps.DB.MarkBlobTrashTx(tx, []string{prev})
+	})
+	if err != nil {
+		return err
+	}
+	m.emit("index:changed", map[string]any{"reason": "cover-clear", "folderID": folderID})
 	return nil
 }

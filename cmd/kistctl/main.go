@@ -51,7 +51,7 @@ const usageText = `用法:kistctl <子命令> [参数]
   covers  migrate [--dry-run] [--max N] --pass-stdin  存量缩略图一次性出库为封面 blob(需要口令与网络;断点续跑,可 --max 分批)
   ls      [/路径]                        列虚拟目录(目录行附子树摘要:话数·大小·最近更新)
   search  <关键词>                       搜索文件名、备注、目录名与目录 tag
-  meta    set <目录|文件> [--note 文本] [--tag a,b] [--cover <uuid|id|0>(仅目录)]  设置元数据(不带 flag 则显示当前值);meta list 列出全部
+  meta    set <目录|文件> [--note 文本] [--tag a,b]  设置元数据(不带 flag 则显示当前值);meta list 列出全部;封面导入/清除在 GUI
   mv      <路径|uuid|id...> <目标目录>    纯索引移动文件与目录,零远端流量(源:"/"开头为目录路径,其余文件 uuid|id;已在目标=空转)
   mkdir   /路径                          建虚拟目录(多级、幂等;纯索引零流量,先建目录再往里 put)
   rename  /路径 新名                     重命名目录(纯索引零流量;同名幂等,撞名报错)
@@ -757,7 +757,25 @@ func cmdOutboxList(args []string) error {
 		}
 		fmt.Printf("%s\t封面(%s)\t密文 %d 字节%s\n", c.BlobName, owner, c.Size, mark)
 	}
-	n := len(files) + len(covers)
+	// 目录封面挂账(v6):同进退语义与文件封面一致
+	folderCovers, err := db.ListUploadingFolderCovers()
+	if err != nil {
+		return errs.From(err)
+	}
+	for _, c := range folderCovers {
+		mark := ""
+		if st, err := os.Stat(transfer.OutboxArtifactPath(c.BlobName)); err != nil {
+			mark = "  [本地产物缺失!]"
+		} else {
+			total += st.Size()
+		}
+		owner := c.BlobName
+		if f, err := db.GetFolder(c.FolderID); err == nil {
+			owner = "目录 " + f.Name
+		}
+		fmt.Printf("%s\t目录封面(%s)\t密文 %d 字节%s\n", c.BlobName, owner, c.Size, mark)
+	}
+	n := len(files) + len(covers) + len(folderCovers)
 	fmt.Printf("共 %d 个待上传,本地产物占用 %d 字节;手工搬运 = 把产物文件名保持原样上传到远端 %s 后执行 outbox verify\n",
 		n, total, cfgRootPath())
 	return nil
@@ -815,10 +833,14 @@ func cmdOutboxPush(args []string) error {
 	if err != nil {
 		return errs.From(err)
 	}
-	n := m.PushPending(context.Background(), files, covers)
+	folderCovers, err := db.ListUploadingFolderCovers()
+	if err != nil {
+		return errs.From(err)
+	}
+	n := m.PushPending(context.Background(), files, covers, folderCovers)
 	fmt.Printf("已入队 %d 个 push\n", n)
 	fails, bytes := waitAndReport(m)
-	audit.Set(map[string]any{"files": len(files), "covers": len(covers), "bytes": bytes})
+	audit.Set(map[string]any{"files": len(files), "covers": len(covers) + len(folderCovers), "bytes": bytes})
 	if fails > 0 {
 		if cfg.Settings.OutboxPushFail == "discard" {
 			return errs.New(errs.Internal,
@@ -1010,7 +1032,7 @@ func cmdSearch(args []string) error {
 		return nil
 	}
 	for _, h := range folderHits {
-		fmt.Printf("D %d\t%s\t%s\n", h.ID, h.Path, folderMetaLine(h.Note, h.Tags, h.CoverFileID))
+		fmt.Printf("D %d\t%s\t%s\n", h.ID, h.Path, folderMetaLine(h.Note, h.Tags))
 	}
 	for _, h := range hits {
 		note := ""
@@ -1023,16 +1045,14 @@ func cmdSearch(args []string) error {
 }
 
 // folderMetaLine 把目录元数据压成一行(search 目录命中与 meta 共用)。
-func folderMetaLine(note string, tags []string, coverFileID int64) string {
+// 封面(v6 持有式)是字节不是索引字段,不入本行——导入/清除在 GUI 元数据面板。
+func folderMetaLine(note string, tags []string) string {
 	var parts []string
 	if len(tags) > 0 {
 		parts = append(parts, "tag:"+strings.Join(tags, ","))
 	}
 	if note != "" {
 		parts = append(parts, "备注:"+note)
-	}
-	if coverFileID != 0 {
-		parts = append(parts, fmt.Sprintf("封面:%d", coverFileID))
 	}
 	if len(parts) == 0 {
 		return "-"
@@ -1044,7 +1064,7 @@ func folderMetaLine(note string, tags []string, coverFileID int64) string {
 
 func cmdMeta(args []string) error {
 	if len(args) == 0 {
-		return errs.New(errs.BadConfig, "用法:kistctl meta <set <目录路径|文件uuid|id> --note/--tag/--cover(cover 仅目录) | list>")
+		return errs.New(errs.BadConfig, "用法:kistctl meta <set <目录路径|文件uuid|id> --note/--tag | list>(封面导入/清除在 GUI)")
 	}
 	switch args[0] {
 	case "set":
@@ -1060,7 +1080,6 @@ func cmdMetaSet(args []string) error {
 	fs := flag.NewFlagSet("meta set", flag.ContinueOnError)
 	note := fs.String("note", "", "备注(空串清除)")
 	tag := fs.String("tag", "", "tag 列表,逗号分隔(空串清空全部;全量覆盖语义)")
-	cover := fs.String("cover", "", "自定义封面:文件 uuid|id;传 0 清除引用(回退派生拼贴)")
 	if err := parseArgs(fs, args); err != nil {
 		return err
 	}
@@ -1096,20 +1115,13 @@ func cmdMetaSet(args []string) error {
 			upd.Tags = parseTagList(*tag)
 		}
 	})
-	if flagProvided(fs, "cover") {
-		id, err := resolveCoverRef(db, *cover)
-		if err != nil {
-			return err
-		}
-		upd.Cover = &id
-	}
-	if upd.Note == nil && upd.Tags == nil && upd.Cover == nil {
+	if upd.Note == nil && upd.Tags == nil {
 		// 不带任何 flag:显示当前元数据
 		m, err := db.GetFolderMeta(folderID)
 		if err != nil {
 			return errs.From(err)
 		}
-		fmt.Printf("%s\t%s\n", virtualPathOf(segs), folderMetaLine(m.Note, m.Tags, m.CoverFileID))
+		fmt.Printf("%s\t%s\n", virtualPathOf(segs), folderMetaLine(m.Note, m.Tags))
 		return nil
 	}
 	if err := db.UpdateFolderMeta(folderID, upd); err != nil {
@@ -1119,9 +1131,8 @@ func cmdMetaSet(args []string) error {
 	return nil
 }
 
-// metaSetFile 文件元数据(TODO-17):--note/--tag 语义与目录侧一致;
-// --cover 仅目录——文件封面是自身 covers 引用行(TODO-10 出库后字节走
-// blob 管线),导入/清除是 GUI 元数据面板的
+// metaSetFile 文件元数据(TODO-17):--note/--tag 语义与目录侧一致。
+// 封面(文件与目录皆然)是持有的封面 blob,导入/清除是 GUI 元数据面板的
 // 对话框操作,CLI 不设等价 flag(真有需要再加 --cover-file)。
 func metaSetFile(db *index.DB, target string, fs *flag.FlagSet, note, tag *string) error {
 	f, err := resolveTarget(db, target)
@@ -1130,9 +1141,6 @@ func metaSetFile(db *index.DB, target string, fs *flag.FlagSet, note, tag *strin
 	}
 	if f.DeletedAt.Valid {
 		return errs.New(errs.NotFound, "文件已删除:"+f.Name)
-	}
-	if flagProvided(fs, "cover") {
-		return errs.New(errs.BadConfig, "--cover 仅用于目录;文件封面的导入/清除请在 GUI 元数据面板操作")
 	}
 	// 与目录侧同款探测:区分"未提供"与"提供了空串"(空串 = 清除)
 	var upd index.FileMetaUpdate
@@ -1149,7 +1157,7 @@ func metaSetFile(db *index.DB, target string, fs *flag.FlagSet, note, tag *strin
 		if err != nil {
 			return errs.From(err)
 		}
-		fmt.Printf("%d\t%s\t%s\n", f.ID, f.Name, folderMetaLine(m.Note, m.Tags, 0))
+		fmt.Printf("%d\t%s\t%s\n", f.ID, f.Name, folderMetaLine(m.Note, m.Tags))
 		return nil
 	}
 	if err := db.UpdateFileMeta(f.ID, upd); err != nil {
@@ -1174,7 +1182,7 @@ func cmdMetaList(args []string) error {
 		return nil
 	}
 	for _, h := range hits {
-		fmt.Printf("%d\t%s\t%s\n", h.ID, h.Path, folderMetaLine(h.Note, h.Tags, h.CoverFileID))
+		fmt.Printf("%d\t%s\t%s\n", h.ID, h.Path, folderMetaLine(h.Note, h.Tags))
 	}
 	return nil
 }
@@ -1188,41 +1196,6 @@ func parseTagList(s string) []string {
 		}
 	}
 	return tags
-}
-
-// flagProvided 探测某个 flag 是否被显式提供(--cover 的空值有语义,不能靠默认值判断)。
-func flagProvided(fs *flag.FlagSet, name string) bool {
-	provided := false
-	fs.Visit(func(fl *flag.Flag) {
-		if fl.Name == name {
-			provided = true
-		}
-	})
-	return provided
-}
-
-// resolveCoverRef 把 --cover 的值(uuid|id|0)解析成 files.id;0 表示清除引用。
-func resolveCoverRef(db *index.DB, v string) (int64, error) {
-	if strings.TrimSpace(v) == "0" {
-		return 0, nil
-	}
-	f, err := resolveTarget(db, v)
-	if err != nil {
-		return 0, err
-	}
-	return checkCoverFile(db, f)
-}
-
-// checkCoverFile 校验封面引用的文件可用:已软删的拒绝;
-// 无封面放行但提示——封面第 1 级要求目标有封面,否则渲染端会回退派生拼贴。
-func checkCoverFile(db *index.DB, f index.FileRow) (int64, error) {
-	if f.DeletedAt.Valid {
-		return 0, errs.New(errs.BadConfig, "封面文件已删除:"+f.Name)
-	}
-	if has, err := db.HasCover(f.ID); err == nil && !has {
-		fmt.Printf("提示:%s 没有封面,引用将回退为派生拼贴\n", f.Name)
-	}
-	return f.ID, nil
 }
 
 // virtualPathOf 由段拼回虚拟路径(splitVirtualPath 的逆,仅展示用)。

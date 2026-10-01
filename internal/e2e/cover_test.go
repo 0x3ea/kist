@@ -5,6 +5,7 @@ package e2e
 // 不误删封面产物);gc 两命名空间分账。
 
 import (
+	"bytes"
 	"context"
 	"os"
 	"path/filepath"
@@ -56,7 +57,7 @@ func TestE2EUploadProducesCoverBlob(t *testing.T) {
 		t.Fatalf("covers 命名空间应恰有封面 blob: %+v %v", covers, err)
 	}
 
-	td, err := e.fetchAndDecryptCover(t, cov)
+	td, err := e.fetchAndDecryptCover(t, cov.BlobName, cov.Size)
 	if err != nil {
 		t.Fatalf("封面解密失败: %v", err)
 	}
@@ -99,7 +100,7 @@ func TestE2EDeferCoverThenPush(t *testing.T) {
 	}
 
 	files, _ := e.db.ListUploading()
-	if n := e.m.PushPending(ctx, files, covers); n != 2 {
+	if n := e.m.PushPending(ctx, files, covers, nil); n != 2 {
 		t.Fatalf("push 应入队 2 笔(文件+封面): %d", n)
 	}
 	// 快照里还有先前的 deferred 记录,不能 allDone,等空闲后直接看账
@@ -325,7 +326,7 @@ func TestE2EMigrateLegacyCovers(t *testing.T) {
 	}
 
 	// 字节一致:解密回 200KB 原数据
-	got, err := e.fetchAndDecryptCover(t, covA)
+	got, err := e.fetchAndDecryptCover(t, covA.BlobName, covA.Size)
 	if err != nil || len(got) != len(dataA) {
 		t.Fatalf("迁移字节: %d %v", len(got), err)
 	}
@@ -402,5 +403,91 @@ func TestE2EMigrateDryRun(t *testing.T) {
 	var left int
 	if err := e.db.QueryRow(`SELECT COUNT(*) FROM thumbnails`).Scan(&left); err != nil || left != 1 {
 		t.Fatalf("dry-run 不得删 legacy 行: %d %v", left, err)
+	}
+}
+
+// TestE2EFolderCoverLifecycle v6 目录封面生命周期:在线导入(ready、字节
+// 可解)→ 在线替换(旧 blob 同事务 trash)→ 断网导入(回退出站箱、uploading
+// 不可见)→ discard 整笔回滚(引用行与产物一起清)。
+func TestE2EFolderCoverLifecycle(t *testing.T) {
+	e := newEnv(t)
+	ctx := context.Background()
+	idA := putSeries(t, e)
+	folderRow, err := e.db.GetFolder(idA)
+	if err != nil {
+		t.Fatal(err)
+	}
+	blobState := func(name string) string {
+		var st string
+		if err := e.db.QueryRow(`SELECT state FROM blobs WHERE name = ?`, name).Scan(&st); err != nil {
+			t.Fatalf("blobs 行缺失 %s: %v", name, err)
+		}
+		return st
+	}
+
+	// 在线导入:直传 ready,字节真在 covers 命名空间且解得回
+	td, err := transfer.MakeThumbnail(makeJPEG(t, t.TempDir(), "封面.jpg", 300, 450))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if deferred, err := e.m.ImportFolderCover(ctx, folderRow, td); err != nil || deferred {
+		t.Fatalf("在线导入: deferred=%v err=%v", deferred, err)
+	}
+	cov1, err := e.db.GetReadyFolderCover(idA)
+	if err != nil || cov1.Source != index.CoverCustom {
+		t.Fatalf("导入后引用: %+v %v", cov1, err)
+	}
+	if got, err := e.fetchAndDecryptCover(t, cov1.BlobName, cov1.Size); err != nil || !bytes.Equal(got, td.Data) {
+		t.Fatalf("封面字节: %d bytes err=%v", len(got), err)
+	}
+	if s, _ := e.db.FolderSummary(idA); !s.CustomCover {
+		t.Fatal("导入后应满铺")
+	}
+
+	// 在线替换:旧 blob 同事务 trash(物理删除交 gc,远端暂留两个对象)
+	td2, err := transfer.MakeThumbnail(makeJPEG(t, t.TempDir(), "封面2.jpg", 400, 500))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := e.m.ImportFolderCover(ctx, folderRow, td2); err != nil {
+		t.Fatal(err)
+	}
+	if blobState(cov1.BlobName) != "trash" {
+		t.Fatalf("被顶掉的旧封面应 trash: %s", blobState(cov1.BlobName))
+	}
+
+	// 断网导入:回退出站箱(用户内容不静默丢),引用 uploading 不可见
+	e.srv.Close()
+	td3, err := transfer.MakeThumbnail(makeJPEG(t, t.TempDir(), "封面3.jpg", 500, 400))
+	if err != nil {
+		t.Fatal(err)
+	}
+	deferred, err := e.m.ImportFolderCover(ctx, folderRow, td3)
+	if err != nil || !deferred {
+		t.Fatalf("断网导入应回退出站箱: deferred=%v err=%v", deferred, err)
+	}
+	hang, err := e.db.ListUploadingFolderCovers()
+	if err != nil || len(hang) != 1 {
+		t.Fatalf("应有一笔目录封面挂账: %+v %v", hang, err)
+	}
+	if _, err := os.Stat(transfer.OutboxArtifactPath(hang[0].BlobName)); err != nil {
+		t.Fatal("目录封面产物应在出站箱")
+	}
+	if _, err := e.db.GetReadyFolderCover(idA); err == nil {
+		t.Fatal("uploading 的目录封面引用应不可见")
+	}
+	if s, _ := e.db.FolderSummary(idA); s.CustomCover {
+		t.Fatal("挂账中的目录封面不应满铺")
+	}
+
+	// discard 整笔回滚:引用行、blobs 行与出站箱产物一起清,干净失败
+	if err := transfer.OutboxDiscard(e.db, hang[0].BlobName); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := e.db.GetReadyFolderCover(idA); err == nil {
+		t.Fatal("discard 后目录封面引用应消失")
+	}
+	if _, err := os.Stat(transfer.OutboxArtifactPath(hang[0].BlobName)); !os.IsNotExist(err) {
+		t.Fatal("discard 后产物应删除")
 	}
 }

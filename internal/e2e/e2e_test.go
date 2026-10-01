@@ -96,11 +96,11 @@ func newEnv(t *testing.T) *env {
 }
 
 // fetchAndDecryptCover 从 covers 命名空间拉取封面 blob 并解密回原字节
-// (TODO-10:验证"字节真的在远端且可解")。
-func (e *env) fetchAndDecryptCover(t *testing.T, cov index.CoverRow) ([]byte, error) {
+// (TODO-10:验证"字节真的在远端且可解");文件与目录封面行通用。
+func (e *env) fetchAndDecryptCover(t *testing.T, blobName string, size int64) ([]byte, error) {
 	t.Helper()
 	tmp := filepath.Join(t.TempDir(), "cover-blob")
-	if err := e.store.GetCoverBlob(context.Background(), cov.BlobName, tmp, nil); err != nil {
+	if err := e.store.GetCoverBlob(context.Background(), blobName, tmp, nil); err != nil {
 		return nil, err
 	}
 	f, err := os.Open(tmp)
@@ -108,7 +108,7 @@ func (e *env) fetchAndDecryptCover(t *testing.T, cov index.CoverRow) ([]byte, er
 		return nil, err
 	}
 	defer f.Close()
-	br, err := crypto.NewBlobReader(f, cov.Size, e.mk)
+	br, err := crypto.NewBlobReader(f, size, e.mk)
 	if err != nil {
 		return nil, err
 	}
@@ -254,7 +254,7 @@ func TestE2ELifecycle(t *testing.T) {
 	if cov.Mime != "image/jpeg" || cov.Size <= 0 || cov.Size > 128<<10 {
 		t.Fatalf("封面引用异常: mime=%s size=%d", cov.Mime, cov.Size)
 	}
-	td, err := e.fetchAndDecryptCover(t, cov)
+	td, err := e.fetchAndDecryptCover(t, cov.BlobName, cov.Size)
 	if err != nil {
 		t.Fatalf("封面 blob 解密失败: %v", err)
 	}

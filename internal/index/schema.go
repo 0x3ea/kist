@@ -2,7 +2,7 @@ package index
 
 // migrations 按版本顺序排列,由 db.migrate() 按 PRAGMA user_version 逐个应用。
 // 结构变更时只允许追加新脚本,不得修改历史脚本(老库要靠它们升级)。
-var migrations = []string{v1Schema, v2AddPack, v3FolderMeta, v4FileTags, v5Covers}
+var migrations = []string{v1Schema, v2AddPack, v3FolderMeta, v4FileTags, v5Covers, v6FolderCovers}
 
 // v5(TODO-10):封面出库——封面字节不再持有于 thumbnails.data,改为
 // 「一封面一 blob」+ 轻引用。thumbnails 表保留为 legacy 只读回退
@@ -28,16 +28,40 @@ CREATE TABLE IF NOT EXISTS covers (
 
 CREATE INDEX IF NOT EXISTS ix_covers_state ON covers(state);`
 
+// v6:目录封面改为持有式——目录不再引用库内文件,而是像文件封面一样
+// 独立持有封面 blob(folder_covers 表,结构与 covers 逐列镜像,仅属主
+// 从 files 换成 folders)。GUI「元数据」对话框从填文件 ID 改为直接导入
+// 本地图片(transfer.ImportFolderCover,字节走 /kist/covers/ 命名空间)。
+// 同时 DROP v3 的 cover_file_id 列:引用式机制整体退场,存量引用失效、
+// 目录封面回退派生拼贴(引用目标文件仍在库里,可重新导入为封面)。
+// 列上带 REFERENCES files(id) 的外键随列一并消失(已实测 DROP COLUMN
+// 在 foreign_keys=ON 下合法,FK 方向是本表指出去而非被引用)。
+const v6FolderCovers = `
+CREATE TABLE IF NOT EXISTS folder_covers (
+  folder_id  INTEGER PRIMARY KEY REFERENCES folders(id) ON DELETE CASCADE,
+  blob_name  TEXT    NOT NULL UNIQUE,   -- 远端 /kist/covers/ 对象名(32hex)
+  size       INTEGER NOT NULL,          -- 密文大小(读侧长度总校验用)
+  width      INTEGER NOT NULL,
+  height     INTEGER NOT NULL,
+  mime       TEXT    NOT NULL,
+  source     TEXT    NOT NULL,          -- custom(GUI 导入;目录无上传派生)
+  state      TEXT    NOT NULL,          -- uploading|ready
+  created_at INTEGER NOT NULL);
+
+CREATE INDEX IF NOT EXISTS ix_folder_covers_state ON folder_covers(state);
+
+ALTER TABLE folders DROP COLUMN cover_file_id;`
+
 // v2(TODO-15):files.pack 标记"目录打包条目"——明文区是一个 zip,
 // get 侧解压还原成文件夹。size 记量化后的明文区总长(显示值,
 // 真实 origSize 以 sealedMeta 为准,不得用索引 size 推明文长度)。
 const v2AddPack = `ALTER TABLE files ADD COLUMN pack INTEGER NOT NULL DEFAULT 0;`
 
 // v3(TODO-16):目录用户元数据与 tag。
-// note/user_meta 与 files 对齐;cover_file_id 是封面三级回退链第 1 级——
-// 指向一个普通文件(通常叫 cover.jpg),复用全部文件管线,不发明封面 blob 类别;
-// 引用悬空(文件被软删/无缩略图)时渲染端自动落第 2 级派生拼贴。
-// tag 走独立表:过滤是 tag 的全部意义,LIKE-over-JSON 撑不起检索面。
+// note/user_meta 与 files 对齐;tag 走独立表:过滤是 tag 的全部意义,
+// LIKE-over-JSON 撑不起检索面。
+// (cover_file_id 引用式封面曾是本版一部分——目录封面指向库内文件、悬空回退
+// 拼贴;v6 起改为持有式 folder_covers 并 DROP 本列,详见 v6 注释。)
 const v3FolderMeta = `
 ALTER TABLE folders ADD COLUMN note TEXT;
 ALTER TABLE folders ADD COLUMN user_meta TEXT;

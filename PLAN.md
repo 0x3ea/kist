@@ -170,7 +170,7 @@ CREATE TABLE sync_state (key TEXT PRIMARY KEY, value TEXT NOT NULL);
 - `PRAGMA journal_mode=WAL; foreign_keys=ON; busy_timeout=5000; user_version=1`(按版本迁移)。
 - **revision**:每个写事务内 +1,单调计数器。TODO-09 起角色从 LWW 裁判(比大小定输赢)变为同步**证人**(与 last_synced_rev 基线三方比较,只回答"谁动过"),不信任时钟。
 - 软删除:查询一律 `WHERE deleted_at IS NULL`;搜索用 `name/note LIKE '%q%'`(FTS5 留作增强)。
-- 用户自定义数据:加密时间/备注存于索引库,随加密备份同步;`user_meta` 为 JSON 扩展位。封面(TODO-10 起不持字节):索引只存 `covers` 轻引用,字节走独立 blob(一封面一 blob,随机名入 `/kist/covers/`);自动封面随上传事务写引用、不额外计 revision,用户封面计 revision(与 SetNote 同级);存量缩略图经 `kistctl covers migrate` 一次性出库。
+- 用户自定义数据:加密时间/备注存于索引库,随加密备份同步;`user_meta` 为 JSON 扩展位。封面(TODO-10 起不持字节):索引只存 `covers`(文件)/`folder_covers`(目录,v6 起目录封面持有式、GUI 导入本地图片)轻引用,字节走独立 blob(一封面一 blob,随机名入 `/kist/covers/`);自动封面随上传事务写引用、不额外计 revision,用户封面计 revision(与 SetNote 同级);存量缩略图经 `kistctl covers migrate` 一次性出库。
 - `SnapshotTo(path)` = `VACUUM INTO`(一致性快照);`ReplaceWith(path)` = 关库→旧库归档→tmp+rename 原子替换→重开。
 
 ### 索引云备份(internal/backup)

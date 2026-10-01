@@ -170,12 +170,11 @@ func attachFileTags(db *DB, hits []FileHit) error {
 // FolderHit 是目录搜索/列表结果。Search 只查文件的时代,目录名不在检索面——
 // 按作品名找,除非文件名恰好含作品名,否则搜不到(FolderHit 补上这一面)。
 type FolderHit struct {
-	ID          int64
-	Name        string
-	Path        string // 完整虚拟路径
-	Note        string
-	Tags        []string
-	CoverFileID int64 // 自定义封面,0 = 未指定
+	ID   int64
+	Name string
+	Path string // 完整虚拟路径
+	Note string
+	Tags []string
 }
 
 // SearchFolders 在目录名、目录 note 与 tag 名中做子串匹配(与 Search 同风格:
@@ -186,7 +185,7 @@ func (db *DB) SearchFolders(q string, limit int) ([]FolderHit, error) {
 	}
 	like := "%" + escapeLike(q) + "%"
 	rows, err := db.Query(`
-		SELECT id, name, COALESCE(note, ''), COALESCE(cover_file_id, 0)
+		SELECT id, name, COALESCE(note, '')
 		FROM folders
 		WHERE deleted_at IS NULL
 		  AND id != ? -- 根目录名为空串,不参与检索
@@ -206,15 +205,15 @@ func (db *DB) SearchFolders(q string, limit int) ([]FolderHit, error) {
 	return hits, nil
 }
 
-// ListFoldersWithMeta 列出带任一元数据(note/tag/封面引用)的活跃目录,meta list 用。
+// ListFoldersWithMeta 列出带任一元数据(note/tag/封面)的活跃目录,meta list 用。
 func (db *DB) ListFoldersWithMeta() ([]FolderHit, error) {
 	rows, err := db.Query(`
-		SELECT id, name, COALESCE(note, ''), COALESCE(cover_file_id, 0)
+		SELECT id, name, COALESCE(note, '')
 		FROM folders
 		WHERE deleted_at IS NULL
 		  AND id != ?
 		  AND (COALESCE(note, '') != ''
-		       OR COALESCE(cover_file_id, 0) != 0
+		       OR EXISTS (SELECT 1 FROM folder_covers fc WHERE fc.folder_id = folders.id)
 		       OR EXISTS (SELECT 1 FROM folder_tags ft WHERE ft.folder_id = folders.id))
 		ORDER BY name`, rootFolderID)
 	if err != nil {
@@ -235,7 +234,7 @@ func (db *DB) scanFolderHits(rows *sql.Rows) ([]FolderHit, error) {
 	var ids []int64
 	for rows.Next() {
 		var h FolderHit
-		if err := rows.Scan(&h.ID, &h.Name, &h.Note, &h.CoverFileID); err != nil {
+		if err := rows.Scan(&h.ID, &h.Name, &h.Note); err != nil {
 			rows.Close()
 			return nil, err
 		}
@@ -343,9 +342,9 @@ func (db *DB) SetUserMeta(id int64, metaJSON string) error {
 
 // ---- 文件元数据(TODO-17):note 已有,这里补 tag 的读写 ----
 
-// FileMeta 是文件的用户元数据投影:文件封面不走这里——封面就是文件自己的
-// 缩略图行(thumbnails),由传输管线上传时生成或 GUI 显式导入,与目录的
-// cover_file_id 引用式不同(目录自身没有字节,文件直接持有)。
+// FileMeta 是文件的用户元数据投影:文件封面不走这里——封面是文件自己
+// 持有的封面引用(covers 表,上传派生或 GUI 导入),读走 GetCover、
+// 写走 SetFileCover,与 note/tag 的纯索引更新分属两条管线。
 type FileMeta struct {
 	Note string   // 备注,参与搜索
 	Tags []string // 无序去重;空切片 = 无 tag

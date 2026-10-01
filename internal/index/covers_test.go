@@ -301,6 +301,92 @@ func TestOutboxCoverAccounting(t *testing.T) {
 	}
 }
 
+// TestOutboxFolderCoverAccounting v6 目录封面挂账:MarkUploaded 按 blob 名
+// 翻 ready;替换返回 prevBlob 且旧 blob trash;仅目录封面账 discard 干净回滚。
+func TestOutboxFolderCoverAccounting(t *testing.T) {
+	db := newTestDB(t)
+	idA := mustFolder(t, db, "作品A")
+
+	seed := func(blob, state string) {
+		t.Helper()
+		err := db.WithTx(func(tx *sql.Tx) error {
+			if _, err := db.PutFolderCover(tx, FolderCoverRow{
+				FolderID: idA, BlobName: blob, Size: 128,
+				Width: 8, Height: 8, Mime: "image/jpeg",
+				Source: CoverCustom, State: state, CreatedAt: 1,
+			}); err != nil {
+				return err
+			}
+			return db.RegisterBlobPending(tx, blob, "cover", 128)
+		})
+		if err != nil {
+			t.Fatalf("seed %s: %v", blob, err)
+		}
+	}
+
+	// uploading 不可见;push 收账翻 ready
+	seed("fcover-1", CoverUploading)
+	if _, err := db.GetReadyFolderCover(idA); err == nil {
+		t.Fatal("uploading 的目录封面引用应不可见")
+	}
+	hang, err := db.ListUploadingFolderCovers()
+	if err != nil || len(hang) != 1 || hang[0].BlobName != "fcover-1" {
+		t.Fatalf("挂账: %+v %v", hang, err)
+	}
+	if err := db.MarkUploaded("fcover-1", 7); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.GetReadyFolderCover(idA); err != nil {
+		t.Fatalf("收账后应 ready: %v", err)
+	}
+
+	// 断网替换:新账 uploading,旧 blob 同事务 trash
+	var prev string
+	err = db.WithTx(func(tx *sql.Tx) error {
+		var err error
+		prev, err = db.PutFolderCover(tx, FolderCoverRow{
+			FolderID: idA, BlobName: "fcover-2", Size: 128,
+			Width: 8, Height: 8, Mime: "image/jpeg",
+			Source: CoverCustom, State: CoverUploading, CreatedAt: 2,
+		})
+		if err != nil {
+			return err
+		}
+		if err := db.MarkBlobTrashTx(tx, []string{prev}); err != nil {
+			return err
+		}
+		return db.RegisterBlobPending(tx, "fcover-2", "cover", 128)
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if prev != "fcover-1" {
+		t.Fatalf("替换应返回旧 blob: %q", prev)
+	}
+
+	// 仅目录封面账 discard:引用行与 blobs 行一起清,文件/目录行不动
+	if _, err := db.DiscardPending("fcover-2"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.GetReadyFolderCover(idA); err == nil {
+		t.Fatal("discard 后目录封面引用应消失")
+	}
+	states, _ := db.ListBlobStates()
+	if len(states) != 1 || states["fcover-1"] != "trash" {
+		t.Fatalf("应只剩 trash 的旧封面: %v", states)
+	}
+	if _, err := db.GetFolder(idA); err != nil {
+		t.Fatalf("discard 目录封面账不得波及目录行: %v", err)
+	}
+
+	// FolderCoverBlobNamesOf:GUI 删除目录时随软删收集 blob 名
+	seed("fcover-3", CoverReady)
+	names, err := db.FolderCoverBlobNamesOf([]int64{idA, 999})
+	if err != nil || len(names) != 1 || names[0] != "fcover-3" {
+		t.Fatalf("FolderCoverBlobNamesOf: %v %v", names, err)
+	}
+}
+
 // TestV5UpgradeFromV4 模拟 v4 老库(版本号回退 + 拆掉 covers 表):
 // 重开时 migrate 应补建 covers,legacy thumbnails 数据无损可读。
 func TestV5UpgradeFromV4(t *testing.T) {
@@ -317,6 +403,8 @@ func TestV5UpgradeFromV4(t *testing.T) {
 	}
 	for _, q := range []string{
 		`DROP TABLE covers`,
+		// v3 的 cover_file_id 列(v6 已删):补回以如实模拟 v4 老库
+		`ALTER TABLE folders ADD COLUMN cover_file_id INTEGER REFERENCES files(id) ON DELETE SET NULL`,
 		`PRAGMA user_version = 4`,
 	} {
 		if _, err := d.Exec(q); err != nil {

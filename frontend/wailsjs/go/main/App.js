@@ -50,6 +50,10 @@ export function GetFileMeta(arg1) {
   return window['go']['main']['App']['GetFileMeta'](arg1);
 }
 
+export function GetFolderCover(arg1) {
+  return window['go']['main']['App']['GetFolderCover'](arg1);
+}
+
 export function GetFolderMeta(arg1) {
   return window['go']['main']['App']['GetFolderMeta'](arg1);
 }
@@ -136,6 +140,10 @@ export function SetActiveDrive(arg1) {
 
 export function SetFileCover(arg1, arg2) {
   return window['go']['main']['App']['SetFileCover'](arg1, arg2);
+}
+
+export function SetFolderCover(arg1, arg2) {
+  return window['go']['main']['App']['SetFolderCover'](arg1, arg2);
 }
 
 export function SetNote(arg1, arg2) {

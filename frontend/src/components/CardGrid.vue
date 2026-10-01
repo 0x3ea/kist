@@ -1,11 +1,12 @@
 <script setup lang="ts">
-// CardGrid.vue — 网格视图:目录卡 = 封面宫格 + 名称 + 摘要;文件卡 = 缩略图
-// 或类型占位 + 名称 + 大小。封面链已由索引层解析为 CoverFileIDs(≤4),
-// 自定义封面 = 单值满铺,由 CoverMosaic 按格数自适应。
+// CardGrid.vue — 网格视图:目录卡 = 自有封面满铺或封面宫格 + 名称 + 摘要;
+// 文件卡 = 缩略图或类型占位 + 名称 + 大小。拼贴链已由索引层解析为
+// CoverFileIDs(≤4)由 CoverMosaic 渲染;目录自有封面(v6)单独走
+// CustomCover 标志 + GetFolderCover 取字节,两者不共用 id 空间。
 // TODO-10 出库后封面可能走网络:全量预取改为 IntersectionObserver 可见优先
 // (rootMargin 提前 200px ≈ 预取一屏),实际并发由 store 的有界队列限制。
 import { index } from '../../wailsjs/go/models'
-import { store, ensureThumb, openDetail, openFolderDetail, summaryText } from '../store'
+import { store, ensureFolderCover, ensureThumb, openDetail, openFolderDetail, summaryText } from '../store'
 import { humanSize } from '../format'
 import { fileKind } from '../fileIcon'
 import CoverMosaic from './CoverMosaic.vue'
@@ -23,7 +24,9 @@ function registerCard(e: index.Entry) {
     if (!elc || !io || pendingFetch.has(elc)) return
     const fetch = () => {
       if (e.IsFolder) {
-        for (const id of store.folder.summaries[String(e.ID)]?.CoverFileIDs ?? []) {
+        const s = store.folder.summaries[String(e.ID)]
+        if (s?.CustomCover) ensureFolderCover(e.ID)
+        for (const id of s?.CoverFileIDs ?? []) {
           if (id) ensureThumb(id)
         }
       } else {
@@ -113,7 +116,12 @@ function folderDblClick(id: number) {
         @click.stop="e.IsFolder ? (store.folderSelection.has(e.ID) ? store.folderSelection.delete(e.ID) : store.folderSelection.add(e.ID)) : toggleFile(e.ID)"
       >
       </span>
-      <CoverMosaic v-if="e.IsFolder" :ids="store.folder.summaries[String(e.ID)]?.CoverFileIDs ?? []" />
+      <!-- 目录卡:自有封面满铺(v6)> 派生宫格;取字节在途时先亮宫格兜底 -->
+      <div v-if="e.IsFolder && store.folder.summaries[String(e.ID)]?.CustomCover" class="thumb">
+        <img v-if="store.folderThumbs.get(e.ID)" :src="store.folderThumbs.get(e.ID)" alt="" />
+        <CoverMosaic v-else :ids="store.folder.summaries[String(e.ID)]?.CoverFileIDs ?? []" />
+      </div>
+      <CoverMosaic v-else-if="e.IsFolder" :ids="store.folder.summaries[String(e.ID)]?.CoverFileIDs ?? []" />
       <div v-else class="thumb">
         <img v-if="store.thumbs.get(e.ID)" :src="store.thumbs.get(e.ID)" alt="" />
         <!-- 无缩略图:按扩展名给类型图标(pack = 目录打包物,独立于普通文件) -->

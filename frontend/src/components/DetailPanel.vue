@@ -1,13 +1,13 @@
 <script setup lang="ts">
 // DetailPanel.vue — 右侧详情,文件与目录共用一个面板(交互约定:单击条目 =
-// 详情、双击目录 = 进入;目录的标签/封面引用等完整编辑仍走右键「元数据」
+// 详情、双击目录 = 进入;目录的标签/封面等完整编辑仍走右键「元数据」
 // 对话框,面板只做速览 + 备注编辑):
 //   文件:缩略图、虚拟路径、大小/密文、加密与上传时间、sha256、备注编辑
-//   目录:封面(自定义引用 > 子条目宫格 > 图标)、tag、子树摘要、备注编辑
+//   目录:封面(自有封面满铺 > 子条目宫格 > 图标)、tag、子树摘要、备注编辑
 // 面板常驻占位(v-if 在内容而非面板上):若选中才挂载,网格会因右栏突然
 // 出现而重排列数,卡片在点击瞬间变宽——点击目标漂移,观感突兀。
 import { computed, ref, watch } from 'vue'
-import { ensureThumb, saveFolderNote, saveNote, store } from '../store'
+import { ensureFolderCover, ensureThumb, saveFolderNote, saveNote, store } from '../store'
 import { fullTime, humanSize } from '../format'
 import { fileKind, folderKind } from '../fileIcon'
 import CoverMosaic from './CoverMosaic.vue'
@@ -29,20 +29,21 @@ watch(
   { immediate: true },
 )
 
-// 目录封面:自定义引用(meta.CoverFileID)取字节满铺;派生宫格补预取——
-// 列表视图目录行不经过 CardGrid 的可见优先预取,面板里第一次看必须自己取;
-// ensureThumb 自带缓存/负缓存/限流,重复触发无代价
+// 目录封面:自有封面(summary.CustomCover)取字节满铺,字节按 folderID 走
+// GetFolderCover(v6,与文件缩略图两条路);派生宫格补预取——列表视图目录行
+// 不经过 CardGrid 的可见优先预取,面板里第一次看必须自己取;两个 ensure
+// 都自带缓存/负缓存/限流,重复触发无代价
 const folderCoverURL = ref('')
 watch(
-  () => [fd.value?.id, fd.value?.meta.CoverFileID] as const,
-  async ([id, coverID]) => {
+  () => [fd.value?.id, fd.value?.summary?.CustomCover] as const,
+  async ([id, custom]) => {
     folderCoverURL.value = ''
     if (!id) return
     for (const cid of fd.value?.summary?.CoverFileIDs ?? []) if (cid) ensureThumb(cid)
-    if (!coverID) return
-    const url = await ensureThumb(coverID)
+    if (!custom) return
+    const url = await ensureFolderCover(id)
     // 取图在途时详情可能已切走
-    if (fd.value?.id === id && fd.value.meta.CoverFileID === coverID) folderCoverURL.value = url
+    if (fd.value?.id === id && fd.value.summary?.CustomCover) folderCoverURL.value = url
   },
   { immediate: true },
 )
@@ -63,8 +64,6 @@ const folderRows = computed(() => {
     if (s.LatestAt > 0) rows.push(['最近更新', fullTime(s.LatestAt)])
     if (s.PendingCount > 0) rows.push(['待上传', `${s.PendingCount} 个(出站箱)`])
   }
-  const coverID = fd.value?.meta.CoverFileID ?? 0
-  if (coverID > 0) rows.push(['封面引用', `文件 #${coverID}`])
   return rows
 })
 
@@ -110,7 +109,7 @@ async function onSaveNote() {
         <textarea v-model="noteDraft" rows="3" />
         <button :disabled="saving" @click="onSaveNote">保存备注</button>
       </label>
-      <p class="hint">标签与封面引用:右键目录 →「元数据」</p>
+      <p class="hint">标签与封面:右键目录 →「元数据」</p>
     </template>
     <template v-else-if="store.detail">
     <div class="thumb">

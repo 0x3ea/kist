@@ -207,3 +207,102 @@ func TestCoverCacheLRUEviction(t *testing.T) {
 		}
 	}
 }
+
+// TestFolderCoverBinding v6 目录封面绑定:导入 → 可读(走目录 uuid 缓存)→
+// 覆盖(旧 blob trash)→ 清除(NOT_FOUND);目录软删连带封面 blob trash。
+func TestFolderCoverBinding(t *testing.T) {
+	a, _ := newNetworkedApp(t)
+	folder := seedFolder(t, a.db, "漫画合集")
+	cover := makeCoverJPEG(t, t.TempDir())
+
+	// 导入:同步返回,GetFolderCover 可读
+	deferred, err := a.SetFolderCover(folder, cover)
+	if err != nil || deferred {
+		t.Fatalf("导入:deferred=%v err=%v", deferred, err)
+	}
+	td, err := a.GetFolderCover(folder)
+	if err != nil || td.Mime != "image/jpeg" || len(td.Data) == 0 {
+		t.Fatalf("导入后目录封面应可读:%+v %v", td, err)
+	}
+	cov, err := a.db.GetReadyFolderCover(folder)
+	if err != nil || cov.Source != index.CoverCustom {
+		t.Fatalf("应为 custom 引用:%+v %v", cov, err)
+	}
+
+	// 无封面/挂账中:NOT_FOUND(前端据此回落拼贴)
+	folder2 := seedFolder(t, a.db, "无封面")
+	if _, err := a.GetFolderCover(folder2); err == nil || !strings.HasPrefix(err.Error(), "[NOT_FOUND]") {
+		t.Fatalf("无封面应 NOT_FOUND:%v", err)
+	}
+
+	// 覆盖:旧 blob 进 trash
+	first := cov.BlobName
+	if _, err := a.SetFolderCover(folder, cover); err != nil {
+		t.Fatal(err)
+	}
+	states, _ := a.db.ListBlobStates()
+	if states[first] != "trash" {
+		t.Fatalf("旧目录封面 blob 应 trash:%v", states)
+	}
+
+	// 清除:纯索引零网络,缓存条目删除
+	deferred, err = a.SetFolderCover(folder, "")
+	if err != nil || deferred {
+		t.Fatalf("清除:deferred=%v err=%v", deferred, err)
+	}
+	if _, err := a.GetFolderCover(folder); err == nil || !strings.HasPrefix(err.Error(), "[NOT_FOUND]") {
+		t.Fatalf("清除后应 NOT_FOUND:%v", err)
+	}
+
+	// 重新导入后软删目录:封面 blob 一并 trash(v6 语义)
+	if _, err := a.SetFolderCover(folder, cover); err != nil {
+		t.Fatal(err)
+	}
+	cov2, _ := a.db.GetReadyFolderCover(folder)
+	if err := a.DeleteEntries(nil, []int64{folder}); err != nil {
+		t.Fatal(err)
+	}
+	states, _ = a.db.ListBlobStates()
+	if states[cov2.BlobName] != "trash" {
+		t.Fatalf("目录软删后封面 blob 应 trash:%v", states)
+	}
+	// 已删目录的封面操作拒绝
+	if _, err := a.SetFolderCover(folder, cover); err == nil || !strings.HasPrefix(err.Error(), "[NOT_FOUND]") {
+		t.Fatalf("已删目录的封面操作应 NOT_FOUND:%v", err)
+	}
+}
+
+// TestSetFolderCoverDeferredOffline 断网导入目录封面:回退出站箱,挂账
+// 不可见;收账(push 语义)后转 ready。
+func TestSetFolderCoverDeferredOffline(t *testing.T) {
+	a, srv := newNetworkedApp(t)
+	folder := seedFolder(t, a.db, "作品")
+	cover := makeCoverJPEG(t, t.TempDir())
+
+	srv.Close() // 模拟断网
+	deferred, err := a.SetFolderCover(folder, cover)
+	if err != nil {
+		t.Fatalf("断网导入应回退 defer 而非报错:%v", err)
+	}
+	if !deferred {
+		t.Fatal("应上报 deferred")
+	}
+	if _, err := a.db.GetReadyFolderCover(folder); err == nil {
+		t.Fatal("uploading 引用应对外不可见")
+	}
+	hang, err := a.db.ListUploadingFolderCovers()
+	if err != nil || len(hang) != 1 {
+		t.Fatalf("应有一笔目录封面挂账:%+v %v", hang, err)
+	}
+	if _, err := os.Stat(transfer.OutboxArtifactPath(hang[0].BlobName)); err != nil {
+		t.Fatal("目录封面产物应在出站箱")
+	}
+
+	// 收账(push 语义):引用转 ready、缓存可读
+	if err := a.db.MarkUploaded(hang[0].BlobName, time.Now().Unix()); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := a.db.GetReadyFolderCover(folder); err != nil {
+		t.Fatalf("收账后应 ready:%v", err)
+	}
+}

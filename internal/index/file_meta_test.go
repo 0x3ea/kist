@@ -170,8 +170,9 @@ func TestFileTagSearch(t *testing.T) {
 	}
 }
 
-// TestV4UpgradeFromV3 模拟 v3 老库(版本号回退 + 拆掉 v4 的表,数据保留):
-// 重新打开时 migrate 应补建 file_tags,既有数据无损。
+// TestV4UpgradeFromV3 模拟 v3 老库(版本号回退 + 拆掉 v4 的表、补回 v3 独有
+// 而现版 schema 已不再建的列,数据保留):重新打开时 migrate 应补建
+// file_tags 并一路升到最新,既有数据无损。
 func TestV4UpgradeFromV3(t *testing.T) {
 	db := newTestDB(t)
 	folderID := mustFolder(t, db, "漫画库")
@@ -185,6 +186,9 @@ func TestV4UpgradeFromV3(t *testing.T) {
 	}
 	for _, q := range []string{
 		`DROP TABLE file_tags`,
+		// v3 的 cover_file_id 列(v6 起在现版 schema 中已删除):补回才能
+		// 如实模拟 v3 老库,migrate 重放 v6 的 DROP COLUMN 才有列可删
+		`ALTER TABLE folders ADD COLUMN cover_file_id INTEGER REFERENCES files(id) ON DELETE SET NULL`,
 		`PRAGMA user_version = 3`,
 	} {
 		if _, err := d.Exec(q); err != nil {

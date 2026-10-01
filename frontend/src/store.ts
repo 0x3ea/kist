@@ -145,6 +145,9 @@ export const store = reactive({
 
   // 缩略图缓存:fileID → dataURL(封面宫格/网格/详情共用)
   thumbs: new Map<number, string>(),
+  // 目录自有封面缓存:folderID → dataURL。与 thumbs 分开存——文件与目录
+  // id 是两张表各自自增,数值会撞,混在一张 Map 里会互相顶掉(v6)
+  folderThumbs: new Map<number, string>(),
 
   // Settings 页
   settings: null as config.Settings | null,
@@ -211,6 +214,7 @@ export async function init() {
     store.selection.clear()
     store.folderSelection.clear()
     store.thumbs.clear()
+    store.folderThumbs.clear()
     exitSearch()
     store.driveSwitchSeq++
     await loadFolder(1)
@@ -535,6 +539,28 @@ function thumbToDataUrl(t: main.ThumbData): string {
   return ''
 }
 
+/** 目录自有封面的 dataURL(v6):与 ensureThumb 同款缓存/队列/负缓存,只是
+ * 缓存与取数(GetFolderCover)都按 folderID 走——两套 id 空间不混用。
+ * 取不到返回空串,调用方回落派生宫格。 */
+export async function ensureFolderCover(folderID: number): Promise<string> {
+  const hit = store.folderThumbs.get(folderID)
+  if (hit !== undefined) return hit
+  await acquireThumb()
+  try {
+    const again = store.folderThumbs.get(folderID)
+    if (again !== undefined) return again
+    const t = await API.GetFolderCover(folderID)
+    const url = thumbToDataUrl(t)
+    store.folderThumbs.set(folderID, url)
+    return url
+  } catch {
+    store.folderThumbs.set(folderID, '') // 负缓存:无封面/挂账中/暂不可达
+    return ''
+  } finally {
+    releaseThumb()
+  }
+}
+
 /** 搜索(300ms 防抖,由输入框直接调) */
 export function searchDebounced(q: string) {
   store.search.query = q
@@ -808,6 +834,30 @@ export async function setFileCover(fileID: number, localPath: string): Promise<'
     if (store.detail?.ID === fileID) {
       store.detail.HasThumb = localPath !== ''
       if (localPath && !deferred) ensureThumb(fileID)
+    }
+    toast('info', localPath ? (deferred ? '封面已入出站箱:outbox push 后对其他设备可见' : '封面已导入') : '封面已清除')
+    return deferred ? 'deferred' : 'ok'
+  } catch (e) {
+    fail(e)
+    return null
+  }
+}
+
+/**
+ * 导入/清除目录自有封面(v6,localPath 空 = 清除):后端同 SetFileCover
+ * 管线——已有封面删旧换新,断网回退出站箱。成功后失效缓存;右栏面板若
+ * 正展示该目录,就地把摘要的 CustomCover 置位/复位,面板与卡片即时跟上
+ * (列表级刷新由 index:changed 事件驱动)。
+ */
+export async function setFolderCover(
+  folderID: number,
+  localPath: string,
+): Promise<'ok' | 'deferred' | null> {
+  try {
+    const deferred = await API.SetFolderCover(folderID, localPath)
+    store.folderThumbs.delete(folderID)
+    if (store.folderDetail?.id === folderID && store.folderDetail.summary) {
+      store.folderDetail.summary.CustomCover = localPath !== '' && !deferred
     }
     toast('info', localPath ? (deferred ? '封面已入出站箱:outbox push 后对其他设备可见' : '封面已导入') : '封面已清除')
     return deferred ? 'deferred' : 'ok'

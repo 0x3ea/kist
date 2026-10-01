@@ -70,7 +70,7 @@ GUI 是纯壳:**零业务逻辑,只编排 internal/***。与 CLI 的关系是同
 |---|---|---|
 | 状态/解锁 | GetAppState / Get·SaveWebDAVConfig / TestConnection / CreateAccount / Unlock / ImportFromRemote / Lock / ChangePassphrase / SyncConflictDetail / ResolveConflict | AppState 含 HasLocalKeyfile(Lock 页三分支判定)+ 当前盘名/盘数;Unlock 成功即后台跑启动对账(见下);SyncConflictDetail 按需拉冲突详情(整拉远端索引,三方局面 + diff);ResolveConflict 裁决前重检 expectRemoteRev,远端已变返回 resolved=false 由前端刷新重裁决;CreateAccount 本地已有 keyfile 时走"开新库"分支(推现有 keyfile,口令不符 AUTH_FAILED);ChangePassphrase 多盘扇出 keyfile |
 | 多盘档案(TODO-21) | ListDrives / SaveDrive / DeleteDrive / SetActiveDrive | SaveDrive 编辑活动盘热更新客户端(SetRemote),新增走查重(URL+用户名+根目录);DeleteDrive 拒绝活动盘与最后一个盘,本地索引文件保留;SetActiveDrive 要求管线空闲、切走前尽力补备份、保持解锁态,发 `drive:switched` |
-| 浏览 | ListFolder / SearchAll / FileInfo / GetCover / SetFileCover / SetNote / SetUserMeta / DeleteEntries / EnsureFolder / MoveEntries / Get·UpdateFolderMeta | ListFolder 绑定层合成面包屑+条目+FolderSummaries(一次往返);FileDetail 是摊平 NullInt64 的 DTO;GetCover 三级来源:磁盘 LRU 缓存(键=文件 uuid)→ 远端 covers 命名空间(需解锁,[LOCKED])→ legacy thumbnails 回退;SetFileCover 导入走 ImportCover(断网回退出站箱返回 deferred,notify 提示)、清除纯索引零网络;UpdateFolderMeta 直传指针语义(nil=不动/零值=清除);MoveEntries 文件+目录混合移动(语义见不变量 17) |
+| 浏览 | ListFolder / SearchAll / FileInfo / GetCover / SetFileCover / GetFolderCover / SetFolderCover / SetNote / SetUserMeta / DeleteEntries / EnsureFolder / MoveEntries / Get·UpdateFolderMeta | ListFolder 绑定层合成面包屑+条目+FolderSummaries(一次往返);FileDetail 是摊平 NullInt64 的 DTO;GetCover 三级来源:磁盘 LRU 缓存(键=文件 uuid)→ 远端 covers 命名空间(需解锁,[LOCKED])→ legacy thumbnails 回退;GetFolderCover(v6)同款但无 legacy 回退,缓存键=目录 uuid;SetFileCover/SetFolderCover 导入走 ImportCover/ImportFolderCover(断网回退出站箱返回 deferred,notify 提示)、清除纯索引零网络;UpdateFolderMeta 直传指针语义(nil=不动/零值=清除);MoveEntries 文件+目录混合移动(语义见不变量 17) |
 | 传输 | PickFiles / PickDir / UploadPaths / DownloadEntries / CancelTransfer / Transfers | 对话框在 Go 侧(v2.15 JS 运行时无 Open*Dialog);上传默认 pack、下载默认解压,不暴露 expand/keepZip;DownloadEntries 文件+目录同收(返回 DownloadPlan{queued,skipped}) |
 | 设置/维护 | Get·SaveSettings / BackupIndexNow / PreviewGC / RunGC | GC 两步确认;孤儿只报告 |
 
@@ -140,7 +140,7 @@ GUI 是纯壳:**零业务逻辑,只编排 internal/***。与 CLI 的关系是同
 | keyfile | 110B 主密钥包装(与远端同一份字节;**所有库共用一把**,TODO-21) |
 | index-<盘ID>.db | 明文索引,**每盘一库**(+WAL/SHM;旧单库 index.db 首启自动改名随迁) |
 | outbox/ | 出站箱:待上传加密产物(文件+封面,TODO-10),**有意持久**,push/verify 后清 |
-| covers/ | 封面明文磁盘缓存(GUI,TODO-10):`<文件uuid>.<ext>`,LRU 预算 `cover_cache_mb` |
+| covers/ | 封面明文磁盘缓存(GUI,TODO-10):`<uuid>.<ext>`(文件与目录封面共用,键=各自 uuid,防多盘共库时数字 id 相撞),LRU 预算 `cover_cache_mb` |
 | backups/ | 被替换/归档的旧索引(`index-<rev>-<ts>.db`、开新库归档的 `index-<盘ID>-<ts>.db`) |
 | kist.log | 运行日志(启动时超 5MiB 轮转留一代 .old)——回答 why |
 | audit.log | 操作审计(TODO-14):每条 CLI 命令一行 JSONL(ts/cmd/ok/错误码/耗时/摘要),append-only 不轮转——回答 what/when;永不记口令/密钥/凭据/内容 |
@@ -149,11 +149,11 @@ GUI 是纯壳:**零业务逻辑,只编排 internal/***。与 CLI 的关系是同
 
 **files.state**:`uploading`(--defer 记账,不可 get)→ `ready`(PUT 完成/push/verify 收账)。`missing` **预留未启用**(尚无生产调用方,预留给"远端对象被外力删除"的检测)。
 
-**covers(TODO-10,封面轻引用)**:`source` = `derived`(上传自动生成,可再生)| `custom`(GUI 导入,用户内容;迁移回填行也记 custom——legacy 无法区分来源,保守保护)。`state` = `uploading`(出站箱挂账,**对外不可见**:GetReadyCover/HasCover/summary 全部过滤)→ `ready`(远端可取)。引用与 blobs 登记同事务;`PutCover`/`ClearCover` 返回被顶掉的旧 blob 名,调用方同事务 `MarkBlobTrashTx` 完成闭环——引用换手与旧字节 trash 不可拆分。
+**covers / folder_covers(TODO-10 + v6,封面轻引用)**:文件侧 `covers`(键 file_id)与目录侧 `folder_covers`(键 folder_id,v6)逐列镜像——不并表是因为 covers 的主键外键在 files,目录行挂不进去,孪生表更便宜也更明确。`source` = `derived`(上传自动生成,可再生;目录侧无此来源)| `custom`(GUI 导入,用户内容;迁移回填行也记 custom——legacy 无法区分来源,保守保护)。`state` = `uploading`(出站箱挂账,**对外不可见**:GetReadyCover/HasCover/summary 全部过滤)→ `ready`(远端可取)。引用与 blobs 登记同事务;`PutCover`/`ClearCover` 与目录侧孪生返回被顶掉的旧 blob 名,调用方同事务 `MarkBlobTrashTx` 完成闭环——引用换手与旧字节 trash 不可拆分。
 
 **files.pack**(TODO-15,schema v2):目录打包条目标记——明文区是一个标准 zip(Store),get 还原成文件夹;其 size 为量化后显示值。
 
-**目录元数据**(TODO-16,schema v3):`folders.note/user_meta/cover_file_id` 与 `tags`/`folder_tags` 两表。tag 走独立表(过滤是 tag 的全部意义);`cover_file_id` 指向普通文件,复用全部文件管线,不发明封面 blob 类别。**元数据三不原则**:不继承、不合并、无告警——聚合面(`FolderSummary`)只聚合计数,永不聚合元数据。`FolderSummary` 纯查询零维护:全量内存建树(不用递归 CTE)后序聚合 PackCount/FileCount/TotalSize/LatestAt/PendingCount,封面三级回退链同一次遍历解析(自定义单图 → 子条目名称序前四的 2×2 宫格、空位记 0 不跳过 → 空作品交渲染端;派生单槽——唯一子条目——回落空切片,满铺语义专属自定义封面)。
+**目录元数据**(TODO-16,schema v3;封面 v6 起改持有式):`folders.note/user_meta` 与 `tags`/`folder_tags` 两表;目录封面在 `folder_covers`(v6,v3 的 `cover_file_id` 引用式已删列退场——GUI 直接导入本地图片,字节走 covers 命名空间,与文件封面同一管线同一规格)。**元数据三不原则**:不继承、不合并、无告警——聚合面(`FolderSummary`)只聚合计数,永不聚合元数据。`FolderSummary` 纯查询零维护:全量内存建树(不用递归 CTE)后序聚合 PackCount/FileCount/TotalSize/LatestAt/PendingCount;封面解析:自有封面(folder_covers ready)单列 `CustomCover` 标志供渲染端满铺(字节走 GetFolderCover,按 folderID 一条路),拼贴链 `CoverFileIDs` 同一次遍历解析(子条目名称序前四的 2×2 宫格、空位记 0 不跳过 → 空作品交渲染端;派生单槽——唯一子条目——回落空切片,满铺语义专属自有封面;子目录的自有封面不进拼贴格——CoverFileIDs 是 fileID 协议,目录字节走另一条取数路,协议不混)。
 
 **文件元数据**(TODO-17,schema v4):`file_tags` 镜像 folder_tags、共享 `tags` 词表——两种作品形态同一词典,死词清理必须 UNION 双表(任一侧清空不得误删另一形态仍在用的同名词);文件封面不是引用而是**自身的 thumbnails 行**,GUI「导入封面」走上传同款 `MakeThumbnail` 管线直写(覆盖语义:pack 的自动首页缩略图被顶掉后清除不恢复;坏图报错不静默,与上传侧的"失败即跳过"相反);`Search` 文件侧补 tag 命中(EXISTS 子查询),`FileHit` 回填 Tags。
 
@@ -226,7 +226,7 @@ GUI 是纯壳:**零业务逻辑,只编排 internal/***。与 CLI 的关系是同
 | put [--dest] [--defer] [--expand] | 加密上传(文件夹默认打包)/ 入出站箱 / 逐文件展开 | ✓ | `Manager.UploadPaths/DeferPaths` |
 | outbox list/push/verify/discard | 出站箱搬运与收账 | ✗(纯密文) | `push.go` |
 | ls / search / info / note | 索引浏览与备注(ls 目录行附子树摘要;search 兼查目录名/tag) | ✗ | `index` 各查询 |
-| meta set/list | 目录/文件元数据:tag/note/封面引用(TODO-16/17;文件目标用 uuid\|id,--cover 仅目录,文件封面导入走 GUI) | ✗ | `UpdateFolderMeta`/`UpdateFileMeta` |
+| meta set/list | 目录/文件元数据:tag/note(TODO-16/17;文件目标用 uuid\|id;封面导入/清除 GUI 专属,CLI 无 flag) | ✗ | `UpdateFolderMeta`/`UpdateFileMeta` |
 | mv | 纯索引移动文件与目录(源:目录 `/路径`、文件 `uuid\|id`;改挂点,零远端流量;重名自动消解;已在目标=空转) | ✗ | `MoveEntries` |
 | mkdir | 建虚拟目录(多级、幂等 mkdir -p 语义;纯索引零流量) | ✗ | `EnsureFolderPath` |
 | rename | 重命名目录或文件(同名幂等 no-op;撞名报错不消解;根/软删/非法段拒绝;纯索引零流量;目录 `/路径`,文件 `uuid\|id`) | ✗ | `RenameFolder`/`RenameFile` |
@@ -248,7 +248,7 @@ GUI 是纯壳:**零业务逻辑,只编排 internal/***。与 CLI 的关系是同
 | crypto | 16 | keyfile 往返/错口令/参数篡改/改口令;blob 往返/篡改/截断/重排/追加/final 冒充/错密钥/v2 填充完整性/流式内存峰值 |
 | dav | 14 | MKCOL 幂等、EnsureDir 幂等、List 目录条目标记、PUT 定长、503/429 退避、4xx 不重试、ctx 取消、Probe 精确请求与网络错误区分 |
 | remote | 2 | TODO-10:covers 命名空间往返(EnsureCoversRoot 记忆化/Put/Probe/Get/Delete/List)、ListBlobs 跳过目录条目、ListAll 携带 IsDir |
-| index | 48 | 目录树、软删可见性、搜索、revision 并发单调、快照/替换往返、重名消解、pack 列往返、库文件迁移(MigrateIndexFile 改名保数据/幂等/目标存在不动);FolderSubtree 子树枚举(嵌套投影/空目录/软删整支剪除+同名软删活跃共存/uploading 透传/根归一);TODO-16:元数据往返/死 tag 清理、目录检索三路命中+软删祖先、子树聚合、封面三级回退(悬空/混合序/截断/留白)、纯索引移动+回滚、元数据经快照存活;TODO-17:文件元数据往返、双形态共享词表的双向死词清理、文件 tag 命中+Tags 回填、v3→v4 升级、手动封面经快照存活;TODO-10:covers 往返(uploading 不可见)、prevBlob 闭环(替换/清除同事务 trash+回滚)、出站箱三路径(defer 双账/收账双翻转/仅封面 discard)、v4→v5 升级(legacy 兜底)、covers 经快照存活、legacy 行进封面链;TODO-22:活路径清单(目录+文件/软删子树不可见)、快照同构查询 |
+| index | 48 | 目录树、软删可见性、搜索、revision 并发单调、快照/替换往返、重名消解、pack 列往返、库文件迁移(MigrateIndexFile 改名保数据/幂等/目标存在不动);FolderSubtree 子树枚举(嵌套投影/空目录/软删整支剪除+同名软删活跃共存/uploading 透传/根归一);TODO-16:元数据往返/死 tag 清理、目录检索三路命中+软删祖先、子树聚合、封面回退(自有满铺/挂账不可见/混合序/截断/留白/单槽回落)、纯索引移动+回滚、元数据经快照存活;TODO-17:文件元数据往返、双形态共享词表的双向死词清理、文件 tag 命中+Tags 回填、v3→v4 升级、手动封面经快照存活;TODO-10:covers 往返(uploading 不可见)、prevBlob 闭环(替换/清除同事务 trash+回滚)、出站箱三路径(defer 双账/收账双翻转/仅封面 discard)、v4→v5 升级(legacy 兜底)、covers 经快照存活、legacy 行进封面链;v6:目录封面挂账(收账双翻转/替换 trash/仅目录封面 discard/软删收集)、老库升级重放 DROP COLUMN;TODO-22:活路径清单(目录+文件/软删子树不可见)、快照同构查询 |
 | backup | 13 | 双设备往返、错密钥、无备份、损坏备份、uploading 状态随备份同步;TODO-22:对账四局面矩阵(含空库自动恢复)、无备份对账两分支、对账错密钥拒绝、远端截断上抛不自愈、重检三态(一致/ stale /远端消失)、详情 diff 三栏+local-ahead 无 diff+无备份报错、diff 截断保真 |
 | transfer | 23 | 临时目录清理留痕;打包粒度五形态、校验整次拒绝、zip 往返(空文件/空目录/unicode/mtime)、取消、zip-slip、非 UTF-8 条目;文件夹下载规划(路径映射+空目录入 dirs、uploading 跳过计数且目录照建、根名 FS+taken 双来源消解且显示名前缀跟随、根/软删拒绝、uniqueLocalNameTaken) |
 | logging | 2 | 轮转阈值 |

@@ -34,11 +34,11 @@ func (db *DB) ListUploading() ([]FileRow, error) {
 	return out, rows.Err()
 }
 
-// MarkUploaded 收账:files 转 ready 并补 uploaded_at,封面引用翻转
-// uploading→ready(TODO-10),blobs pending 转 active。经 WithTx(计入
-// revision,多设备同步能感知);幂等——对已 ready 的行无操作。
-// 一个 blob 名只会命中 files 或 covers 之一(blobs.name 全局唯一),
-// 三个 UPDATE 天然各管各的,无需按 kind 分叉。
+// MarkUploaded 收账:files 转 ready 并补 uploaded_at,封面引用(文件侧
+// covers 与目录侧 folder_covers)翻转 uploading→ready(TODO-10,v6 补目录),
+// blobs pending 转 active。经 WithTx(计入 revision,多设备同步能感知);
+// 幂等——对已 ready 的行无操作。一个 blob 名只会命中 files/covers/
+// folder_covers 之一(blobs.name 全局唯一),各 UPDATE 天然各管各的。
 func (db *DB) MarkUploaded(blobName string, at int64) error {
 	return db.WithTx(func(tx *sql.Tx) error {
 		if _, err := tx.Exec(
@@ -48,6 +48,11 @@ func (db *DB) MarkUploaded(blobName string, at int64) error {
 		}
 		if _, err := tx.Exec(
 			`UPDATE covers SET state = ? WHERE blob_name = ? AND state = ?`,
+			CoverReady, blobName, CoverUploading); err != nil {
+			return err
+		}
+		if _, err := tx.Exec(
+			`UPDATE folder_covers SET state = ? WHERE blob_name = ? AND state = ?`,
 			CoverReady, blobName, CoverUploading); err != nil {
 			return err
 		}
@@ -109,16 +114,28 @@ func (db *DB) DiscardPending(blobName string) (coverBlobs []string, err error) {
 				}
 			}
 		} else {
-			// 单独的封面账:按 blob 名删引用行,文件行不动
+			// 单独的封面账:按 blob 名删引用行(文件封面或目录封面),
+			// 属主行(文件/目录)不动
 			res, err := tx.Exec(
 				`DELETE FROM covers WHERE blob_name = ? AND state = ?`, blobName, CoverUploading)
 			if err != nil {
 				return err
 			}
-			if n, err := res.RowsAffected(); err != nil {
+			n, err := res.RowsAffected()
+			if err != nil {
 				return err
-			} else if n == 0 {
-				return fmt.Errorf("index: %q 不是待上传对象,拒绝放弃(已就绪文件请用 rm)", blobName)
+			}
+			if n == 0 {
+				res, err = tx.Exec(
+					`DELETE FROM folder_covers WHERE blob_name = ? AND state = ?`, blobName, CoverUploading)
+				if err != nil {
+					return err
+				}
+				if n, err = res.RowsAffected(); err != nil {
+					return err
+				} else if n == 0 {
+					return fmt.Errorf("index: %q 不是待上传对象,拒绝放弃(已就绪文件请用 rm)", blobName)
+				}
 			}
 		}
 		_, err := tx.Exec(`DELETE FROM blobs WHERE name = ?`, blobName)

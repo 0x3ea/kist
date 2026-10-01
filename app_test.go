@@ -315,7 +315,6 @@ func TestFolderMetaBinding(t *testing.T) {
 		t.Fatal("Tags 应归一为空数组(前端遍历安全)")
 	}
 	note := "试读:第一卷"
-	cover := int64(0)
 	if err := a.UpdateFolderMeta(idA, index.FolderMetaUpdate{Note: &note, Tags: []string{"连载"}}); err != nil {
 		t.Fatal(err)
 	}
@@ -336,10 +335,6 @@ func TestFolderMetaBinding(t *testing.T) {
 	}
 	if len(m.Tags) != 0 {
 		t.Fatalf("空 Tags 应全量清空:%+v", m.Tags)
-	}
-	// Cover 指向零值=清除(此处本来就零,验证不报错即可)
-	if err := a.UpdateFolderMeta(idA, index.FolderMetaUpdate{Cover: &cover}); err != nil {
-		t.Fatal(err)
 	}
 }
 

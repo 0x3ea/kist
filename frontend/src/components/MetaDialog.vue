@@ -2,12 +2,14 @@
 // MetaDialog.vue — 元数据编辑(TODO-16 目录 + TODO-17 文件泛化)。三不原则:
 // 不继承、不合并、无告警;Note/Tags "改哪项发哪项",未动字段传 nil(undefined),
 // 空串/空数组是显式清除——与后端指针语义一一对应。
-// 文件形态的封面不走表单保存:导入/清除是即时操作(SetFileCover),pack 的
-// 自动首页封面被顶掉后清除不恢复,两处确认框都明示。
+// 封面不走表单保存:目录与文件一样是即时导入/清除操作(v6 起目录封面
+// 持有式,从本地图片导入而非引用库内文件);pack 的自动首页封面被顶掉后
+// 清除不恢复,确认框明示。
 import { onMounted, ref } from 'vue'
 import { index } from '../../wailsjs/go/models'
 import {
   askConfirm,
+  ensureFolderCover,
   ensureThumb,
   getFileMeta,
   getFolderMeta,
@@ -16,9 +18,10 @@ import {
   saveFileMeta,
   saveFolderMeta,
   setFileCover,
+  setFolderCover,
   store,
 } from '../store'
-import { fileKind } from '../fileIcon'
+import { fileKind, folderKind } from '../fileIcon'
 
 const props = defineProps<{
   mode: 'folder' | 'file'
@@ -30,14 +33,13 @@ const emit = defineEmits<{ close: [] }>()
 
 const note = ref('')
 const tags = ref('')
-const cover = ref('') // 目录形态:封面文件 ID 输入
-const coverURL = ref('') // 文件形态:当前封面预览
+const coverURL = ref('') // 当前封面预览(目录与文件各自按属主 id 取)
 const busy = ref(false)
 // 记录初始值:保存时只把被改动的字段发出去(nil = 不动)
-const orig = ref({ note: '', tags: '', cover: '' })
+const orig = ref({ note: '', tags: '' })
 
 async function refreshCover() {
-  coverURL.value = await ensureThumb(props.id)
+  coverURL.value = props.mode === 'folder' ? await ensureFolderCover(props.id) : await ensureThumb(props.id)
 }
 
 onMounted(async () => {
@@ -46,62 +48,55 @@ onMounted(async () => {
     if (!m) return
     note.value = m.Note
     tags.value = (m.Tags ?? []).join(', ')
-    cover.value = m.CoverFileID ? String(m.CoverFileID) : ''
   } else {
     const m = await getFileMeta(props.id)
     if (!m) return
     note.value = m.Note
     tags.value = (m.Tags ?? []).join(', ')
-    refreshCover()
   }
-  orig.value = { note: note.value, tags: tags.value, cover: cover.value }
+  refreshCover()
+  orig.value = { note: note.value, tags: tags.value }
 })
 
 async function onSave() {
   const changed = { note: note.value !== orig.value.note, tags: tags.value !== orig.value.tags }
-  if (props.mode === 'folder') {
-    const upd = new index.FolderMetaUpdate()
-    if (changed.note) upd.Note = note.value // 空串 = 清除
-    if (changed.tags) {
-      upd.Tags = tags.value
-        .split(/[,，]/)
-        .map((t) => t.trim())
-        .filter(Boolean)
-    }
-    if (cover.value !== orig.value.cover) {
-      const n = Number(cover.value.trim() || '0')
-      if (Number.isNaN(n) || n < 0) {
-        store.toasts.push({ id: Date.now(), level: 'error', text: '封面引用必须是文件 ID 数字(0 = 清除)' })
-        return
-      }
-      upd.Cover = n // 0 = 清除回退拼贴
-    }
-    busy.value = true
-    const ok = await saveFolderMeta(props.id, upd)
-    busy.value = false
-    if (ok) {
-      // 右栏目录详情若正展示该目录,重拉快照,面板与保存结果保持一致
-      if (store.folderDetail?.id === props.id) openFolderDetail(props.id)
-      emit('close')
-    }
-    return
-  }
-  const upd = new index.FileMetaUpdate()
-  if (changed.note) upd.Note = note.value
-  if (changed.tags) {
-    upd.Tags = tags.value
-      .split(/[,，]/)
-      .map((t) => t.trim())
-      .filter(Boolean)
-  }
   if (!changed.note && !changed.tags) {
-    emit('close') // 文件形态封面是即时操作,无改动即关
+    emit('close') // 封面是即时操作,元数据无改动即关
     return
   }
   busy.value = true
-  const ok = await saveFileMeta(props.id, upd)
+  const ok =
+    props.mode === 'folder'
+      ? await saveFolderMeta(props.id, folderUpdate(changed))
+      : await saveFileMeta(props.id, fileUpdate(changed))
   busy.value = false
-  if (ok) emit('close')
+  if (ok) {
+    // 右栏目录详情若正展示该目录,重拉快照,面板与保存结果保持一致
+    if (props.mode === 'folder' && store.folderDetail?.id === props.id) openFolderDetail(props.id)
+    emit('close')
+  }
+}
+
+// 拆分构造更新请求:Note 空串 = 清除;Tags 全量覆盖(逗号/全角逗号分隔)
+function folderUpdate(changed: { note: boolean; tags: boolean }) {
+  const upd = new index.FolderMetaUpdate()
+  if (changed.note) upd.Note = note.value
+  if (changed.tags) upd.Tags = parseTags(tags.value)
+  return upd
+}
+
+function fileUpdate(changed: { note: boolean; tags: boolean }) {
+  const upd = new index.FileMetaUpdate()
+  if (changed.note) upd.Note = note.value
+  if (changed.tags) upd.Tags = parseTags(tags.value)
+  return upd
+}
+
+function parseTags(s: string): string[] {
+  return s
+    .split(/[,，]/)
+    .map((t) => t.trim())
+    .filter(Boolean)
 }
 
 async function onImportCover() {
@@ -118,7 +113,9 @@ async function onImportCover() {
     return
   const path = await pickImageFile()
   if (!path) return
-  if (await setFileCover(props.id, path)) refreshCover()
+  if (props.mode === 'folder') {
+    if (await setFolderCover(props.id, path)) refreshCover()
+  } else if (await setFileCover(props.id, path)) refreshCover()
 }
 
 async function onClearCover() {
@@ -127,13 +124,17 @@ async function onClearCover() {
   if (
     !(await askConfirm({
       title: '清除封面',
-      message: `清除封面?${extra}该文件将回落类型占位图。`,
+      message:
+        props.mode === 'folder'
+          ? `清除封面?${extra}该目录将回退子条目拼贴。`
+          : `清除封面?${extra}该文件将回落类型占位图。`,
       danger: props.pack, // 普通封面可随时重导;pack 自动首页顶掉后不可恢复
       confirmText: '清除',
     }))
   )
     return
-  if (await setFileCover(props.id, '')) refreshCover()
+  const ok = props.mode === 'folder' ? await setFolderCover(props.id, '') : await setFileCover(props.id, '')
+  if (ok) refreshCover()
 }
 </script>
 
@@ -150,29 +151,31 @@ async function onClearCover() {
         标签(逗号分隔)
         <input v-model="tags" type="text" placeholder="科幻, 已完结, 作者:某人" />
       </label>
-      <label v-if="mode === 'folder'">
-        封面文件 ID(0 = 清除,回退子条目拼贴;ID 见文件详情)
-        <input v-model="cover" type="text" placeholder="0" />
-      </label>
-      <div v-else class="cover-row">
+      <div class="cover-row">
         <div class="cover-box">
           <img v-if="coverURL" :src="coverURL" alt="" />
           <component
-            :is="fileKind(name, pack).icon"
+            :is="mode === 'folder' ? folderKind.icon : fileKind(name, pack).icon"
             v-else
             class="cover-empty"
             :size="32"
             :stroke-width="1.5"
-            :color="fileKind(name, pack).color"
+            :color="mode === 'folder' ? folderKind.color : fileKind(name, pack).color"
           />
         </div>
         <div class="cover-ops">
           <button :disabled="busy" @click="onImportCover">导入封面…</button>
           <button :disabled="busy || !coverURL" @click="onClearCover">清除封面</button>
-          <p class="hint">本地图片导入,随索引备份同步;mp4 等无自动缩略图的内容由此获得封面(epub 上传时已自动抽包内封面)。</p>
+          <p class="hint">
+            {{
+              mode === 'folder'
+                ? '本地图片导入,随索引备份同步;已设封面会被替换,清除后回退子条目拼贴。'
+                : '本地图片导入,随索引备份同步;mp4 等无自动缩略图的内容由此获得封面(epub 上传时已自动抽包内封面)。'
+            }}
+          </p>
         </div>
       </div>
-      <p class="hint">留空不变;备注/标签清空即删除;目录封面引用需为有缩略图的文件。</p>
+      <p class="hint">留空不变;备注/标签清空即删除。</p>
       <div class="row">
         <button @click="emit('close')">取消</button>
         <button class="primary" :disabled="busy" @click="onSave">保存</button>
@@ -238,7 +241,7 @@ textarea {
   gap: 10px;
 }
 
-/* 文件形态:封面预览 + 即时操作 */
+/* 封面预览 + 即时操作(目录与文件共用) */
 .cover-row {
   display: flex;
   gap: 12px;

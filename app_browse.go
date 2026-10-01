@@ -255,7 +255,8 @@ func (a *App) SetUserMeta(fileID int64, metaJSON string) (err error) {
 }
 
 // DeleteEntries 软删条目:文件与 CLI rm 同款(软删+blob 标 trash,远端清理由 gc);
-// 目录仅隐藏子树——内部文件的 blob 不自动标 trash,彻底清理需逐文件删除后 gc
+// 目录隐藏子树并 trash 其自有封面 blob(v6:目录封面是持有的字节,随目录
+// 一同退场)——内部文件的 blob 不自动标 trash,彻底清理需逐文件删除后 gc
 // (GUI 不做子树展开删除的业务逻辑)。
 func (a *App) DeleteEntries(fileIDs, folderIDs []int64) (err error) {
 	defer a.panicGuard(&err)
@@ -291,6 +292,17 @@ func (a *App) DeleteEntries(fileIDs, folderIDs []int64) (err error) {
 	if len(folderIDs) > 0 {
 		if err := db.SoftDeleteFolders(folderIDs); err != nil {
 			return a.wrap(errs.From(err))
+		}
+		// 目录自有封面 blob 一并 trash(v6):引用行随 folders 行留存
+		// (软删非硬删),trash 后 gc 物理回收
+		folderCoverNames, err := db.FolderCoverBlobNamesOf(folderIDs)
+		if err != nil {
+			return a.wrap(errs.From(err))
+		}
+		if len(folderCoverNames) > 0 {
+			if err := db.MarkBlobTrash(folderCoverNames); err != nil {
+				return a.wrap(errs.From(err))
+			}
 		}
 	}
 	a.emitIndexChanged("delete")
@@ -386,8 +398,9 @@ func (a *App) GetFolderMeta(folderID int64) (m index.FolderMeta, err error) {
 	return m, nil
 }
 
-// UpdateFolderMeta 增量写目录元数据:Note/Cover 为 nil=不动、指向零值=清除;
+// UpdateFolderMeta 增量写目录元数据:Note 为 nil=不动、空串=清除;
 // Tags 非 nil 即全量覆盖(index.FolderMetaUpdate 的指针语义原生穿透前端)。
+// 封面不经此口(与文件侧同理):导入/清除走 SetFolderCover。
 func (a *App) UpdateFolderMeta(folderID int64, u index.FolderMetaUpdate) (err error) {
 	defer a.panicGuard(&err)
 	db, err := a.requireDB()
@@ -399,6 +412,94 @@ func (a *App) UpdateFolderMeta(folderID int64, u index.FolderMetaUpdate) (err er
 	}
 	a.emitIndexChanged("meta")
 	return nil
+}
+
+// GetFolderCover 取目录自有封面(v6):读路径与 GetCover 同款——磁盘 LRU
+// 缓存(键 = 目录 uuid,防多盘共库时数字 id 相撞)→ 未命中从远端 covers
+// 命名空间拉取解密(需解锁,锁定报 [LOCKED])。无自有封面或挂账中
+// (uploading)返回 NOT_FOUND,前端据此回落派生拼贴;目录无 legacy
+// thumbnails 回退(那是文件缩略图的过渡路径)。
+func (a *App) GetFolderCover(folderID int64) (t ThumbData, err error) {
+	defer a.panicGuard(&err)
+	db, err := a.requireDB()
+	if err != nil {
+		return t, a.wrap(err)
+	}
+	cov, err := db.GetReadyFolderCover(folderID)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return t, a.wrap(errs.New(errs.NotFound, "该目录没有封面"))
+		}
+		return t, a.wrap(errs.From(err))
+	}
+	f, err := db.GetFolder(folderID)
+	if err != nil {
+		return t, a.wrap(errs.From(err))
+	}
+	cacheKey := f.UUID + extForMime(cov.Mime)
+	if data, rerr := readCoverCache(cacheKey); rerr == nil {
+		return ThumbData{Data: data, Mime: cov.Mime}, nil
+	}
+	mk, ok := a.mkSnapshot()
+	if !ok {
+		return t, a.wrap(errs.New(errs.Locked, "封面未缓存:解锁后可从远端获取"))
+	}
+	store, serr := a.requireStore()
+	if serr != nil {
+		return t, a.wrap(serr)
+	}
+	data, ferr := fetchCoverBlob(a.callCtx(), store, mk, cov.BlobName, cov.Size)
+	if ferr != nil {
+		return t, a.wrap(errs.From(ferr))
+	}
+	writeCoverCache(cacheKey, data)
+	a.enforceCoverCacheLRU()
+	return ThumbData{Data: data, Mime: cov.Mime}, nil
+}
+
+// SetFolderCover 导入/清除目录封面(v6 起持有式):语义与 SetFileCover
+// 逐句相同——localPath 空串 = 清除(纯索引:删引用,旧 blob 同事务 trash,
+// 物理删除交给 gc);导入 = MakeThumbnail 同规格 → 加密 PUT covers 命名空间
+// (已有封面即删旧换新),计 revision;远端不可达回退出站箱(deferred=true)。
+func (a *App) SetFolderCover(folderID int64, localPath string) (deferred bool, err error) {
+	defer a.panicGuard(&err)
+	db, err := a.requireDB()
+	if err != nil {
+		return false, a.wrap(err)
+	}
+	f, err := db.GetFolder(folderID)
+	if err != nil {
+		return false, a.wrap(errs.From(err))
+	}
+	if f.DeletedAt.Valid {
+		return false, a.wrap(errs.New(errs.NotFound, "目录已删除:"+f.Name))
+	}
+	mgr, err := a.requireMgr()
+	if err != nil {
+		return false, a.wrap(err)
+	}
+	if localPath == "" {
+		if err := mgr.ClearFolderCover(folderID); err != nil {
+			return false, a.wrap(errs.From(err))
+		}
+	} else {
+		td, err := transfer.MakeThumbnail(localPath)
+		if err != nil {
+			return false, a.wrap(errs.New(errs.BadConfig, "封面导入失败:"+err.Error()))
+		}
+		if deferred, err = mgr.ImportFolderCover(a.callCtx(), f, td); err != nil {
+			return false, a.wrap(errs.From(err))
+		}
+	}
+	// 同一 uuid 的缓存字节已过期,显式删除防旧图复活
+	removeCoverCache(f.UUID)
+	// 目录卡片是否满铺由 summary.CustomCover 驱动,导入/清除后必须刷新列表
+	// 聚合(文件封面无此耦合——文件卡的图直接来自 thumbs 缓存,故 SetFileCover 不发)
+	a.emitIndexChanged("meta")
+	if deferred {
+		a.emitNotify("info", "封面已入出站箱:outbox push 完成前其他设备不可见")
+	}
+	return deferred, nil
 }
 
 // ---- 文件元数据(TODO-17):tag 挂文件 + 手动封面 ----

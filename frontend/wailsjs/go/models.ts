@@ -275,7 +275,6 @@ export namespace index {
 	    Path: string;
 	    Note: string;
 	    Tags: string[];
-	    CoverFileID: number;
 	
 	    static createFrom(source: any = {}) {
 	        return new FolderHit(source);
@@ -288,13 +287,11 @@ export namespace index {
 	        this.Path = source["Path"];
 	        this.Note = source["Note"];
 	        this.Tags = source["Tags"];
-	        this.CoverFileID = source["CoverFileID"];
 	    }
 	}
 	export class FolderMeta {
 	    Note: string;
 	    UserMeta: string;
-	    CoverFileID: number;
 	    Tags: string[];
 	
 	    static createFrom(source: any = {}) {
@@ -305,13 +302,11 @@ export namespace index {
 	        if ('string' === typeof source) source = JSON.parse(source);
 	        this.Note = source["Note"];
 	        this.UserMeta = source["UserMeta"];
-	        this.CoverFileID = source["CoverFileID"];
 	        this.Tags = source["Tags"];
 	    }
 	}
 	export class FolderMetaUpdate {
 	    Note?: string;
-	    Cover?: number;
 	    Tags: string[];
 	
 	    static createFrom(source: any = {}) {
@@ -321,7 +316,6 @@ export namespace index {
 	    constructor(source: any = {}) {
 	        if ('string' === typeof source) source = JSON.parse(source);
 	        this.Note = source["Note"];
-	        this.Cover = source["Cover"];
 	        this.Tags = source["Tags"];
 	    }
 	}
@@ -331,6 +325,7 @@ export namespace index {
 	    TotalSize: number;
 	    LatestAt: number;
 	    PendingCount: number;
+	    CustomCover: boolean;
 	    CoverFileIDs: number[];
 	
 	    static createFrom(source: any = {}) {
@@ -344,6 +339,7 @@ export namespace index {
 	        this.TotalSize = source["TotalSize"];
 	        this.LatestAt = source["LatestAt"];
 	        this.PendingCount = source["PendingCount"];
+	        this.CustomCover = source["CustomCover"];
 	        this.CoverFileIDs = source["CoverFileIDs"];
 	    }
 	}

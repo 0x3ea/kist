@@ -75,10 +75,11 @@ type job struct {
 	pack        bool  // 目录打包任务(TODO-15):源是目录,zip 流直挂 BlobWriter
 	sizeHint    int64 // pack:源文件总字节(进度预估;准确值以加密结果为准)
 	// 下载/push
-	file    index.FileRow
-	cover   *index.CoverRow // push 任务的封面账(TODO-10):非 nil 时按封面账处理
-	destDir string
-	keepZip bool // pack 下载不解压,落 <名>.zip(TODO-15)
+	file        index.FileRow
+	cover       *index.CoverRow       // push 任务的封面账(TODO-10):非 nil 时按封面账处理
+	folderCover *index.FolderCoverRow // push 任务的目录封面账(v6):非 nil 时按封面账处理
+	destDir     string
+	keepZip     bool // pack 下载不解压,落 <名>.zip(TODO-15)
 }
 
 // Manager 是传输管线:动态并发上限的单调度器 + 每任务独立 ctx(可取消)。

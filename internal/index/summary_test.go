@@ -230,6 +230,24 @@ func TestFolderSummary(t *testing.T) {
 	}
 }
 
+// mustFolderCover 种一行目录自有封面引用(v6)。
+func mustFolderCover(t *testing.T, db *DB, folderID int64, state string) string {
+	t.Helper()
+	blob := fmt.Sprintf("fcover-%d", folderID)
+	err := db.WithTx(func(tx *sql.Tx) error {
+		_, err := db.PutFolderCover(tx, FolderCoverRow{
+			FolderID: folderID, BlobName: blob, Size: 128,
+			Width: 8, Height: 8, Mime: "image/jpeg", Source: CoverCustom,
+			State: state, CreatedAt: now(),
+		})
+		return err
+	})
+	if err != nil {
+		t.Fatalf("PutFolderCover(%d): %v", folderID, err)
+	}
+	return blob
+}
+
 func TestCoverFallbackChain(t *testing.T) {
 	db := newTestDB(t)
 	idA, idSub, ch1, ch2, cover, notes := buildSeries(t, db)
@@ -237,7 +255,7 @@ func TestCoverFallbackChain(t *testing.T) {
 	mustThumb(t, db, cover)
 	mustThumb(t, db, notes)
 
-	// 第 2 级(无自定义封面):子条目混合名序 = cover.jpg, 第01话.zip, 第02话.zip, 设定集/
+	// 派生拼贴(无自有封面):子条目混合名序 = cover.jpg, 第01话.zip, 第02话.zip, 设定集/
 	// cover.jpg 与第01话.zip 有缩略图;第02话.zip 无缩略图记 0;
 	// 设定集是目录,下钻解析到子树内首个有缩略图的 notes.txt
 	s, err := db.FolderSummary(idA)
@@ -248,47 +266,62 @@ func TestCoverFallbackChain(t *testing.T) {
 	if !slices.Equal(s.CoverFileIDs, want) {
 		t.Fatalf("派生四宫格: got %v want %v", s.CoverFileIDs, want)
 	}
-
-	// 子目录的格子:representative 下钻取子树内首个有缩略图的文件
-	coverA := cover
-	if err := db.UpdateFolderMeta(idA, FolderMetaUpdate{Cover: nil}); err != nil {
-		t.Fatal(err)
+	if s.CustomCover {
+		t.Fatal("未设自有封面不应满铺")
 	}
+
+	// 子目录的格子:representative 下钻取子树内首个有缩略图的文件。
+	// 设定集的直接子条目只有 notes.txt(有缩略图):单槽派生不构成宫格,
+	// 回落空切片(渲染端显示默认文件夹图标,满铺专属自有封面)
 	sSub, err := db.FolderSummary(idSub)
 	if err != nil {
 		t.Fatal(err)
 	}
-	// 设定集的直接子条目只有 notes.txt(有缩略图):单槽派生不构成宫格,
-	// 回落空切片(渲染端显示默认文件夹图标,满铺专属自定义封面)
 	if len(sSub.CoverFileIDs) != 0 {
 		t.Fatalf("子目录单槽应回落: %v", sSub.CoverFileIDs)
 	}
-	_ = coverA
 
-	// 第 1 级:设置自定义封面 → 单图满铺
-	if err := db.UpdateFolderMeta(idA, FolderMetaUpdate{Cover: &cover}); err != nil {
-		t.Fatal(err)
-	}
+	// 自有封面(ready)→ CustomCover 满铺标志;拼贴链保留(渲染端满铺时不看)
+	mustFolderCover(t, db, idA, CoverReady)
 	s, _ = db.FolderSummary(idA)
-	if !slices.Equal(s.CoverFileIDs, []int64{cover}) {
-		t.Fatalf("自定义封面: %v", s.CoverFileIDs)
+	if !s.CustomCover {
+		t.Fatal("自有封面应满铺")
 	}
-
-	// 引用悬空(封面文件被软删)→ 回退第 2 级,且封面文件不再是子条目:
-	// 剩 3 个子条目(第01话有缩略图、第02话无、设定集下钻到 notes),尾部留白
-	if err := db.SoftDeleteFiles([]int64{cover}); err != nil {
-		t.Fatal(err)
-	}
-	s, _ = db.FolderSummary(idA)
-	want = []int64{ch1, 0, notes}
 	if !slices.Equal(s.CoverFileIDs, want) {
-		t.Fatalf("悬空回退: got %v want %v", s.CoverFileIDs, want)
+		t.Fatalf("满铺时拼贴链应保留原值: got %v want %v", s.CoverFileIDs, want)
 	}
 
-	// 第 3 级:空作品返回空切片,渲染端自决
+	// 挂账中(uploading)不可见:CustomCover=false,继续走派生拼贴
+	if err := db.WithTx(func(tx *sql.Tx) error {
+		_, err := tx.Exec(`UPDATE folder_covers SET state = ? WHERE folder_id = ?`, CoverUploading, idA)
+		return err
+	}); err != nil {
+		t.Fatal(err)
+	}
+	s, _ = db.FolderSummary(idA)
+	if s.CustomCover {
+		t.Fatal("uploading 挂账不应可见")
+	}
+
+	// 清除自有封面 → 回落派生拼贴
+	if err := db.WithTx(func(tx *sql.Tx) error {
+		prev, err := db.ClearFolderCover(tx, idA)
+		if err != nil {
+			return err
+		}
+		return db.MarkBlobTrashTx(tx, []string{prev})
+	}); err != nil {
+		t.Fatal(err)
+	}
+	s, _ = db.FolderSummary(idA)
+	if s.CustomCover || !slices.Equal(s.CoverFileIDs, want) {
+		t.Fatalf("清除后应回落拼贴: %+v", s)
+	}
+
+	// 空作品:拼贴空切片 + 无自有封面,渲染端自决
 	idEmpty := mustFolder(t, db, "空作品")
 	s, err = db.FolderSummary(idEmpty)
-	if err != nil || len(s.CoverFileIDs) != 0 {
+	if err != nil || len(s.CoverFileIDs) != 0 || s.CustomCover {
 		t.Fatalf("空作品封面: %+v %v", s, err)
 	}
 
@@ -517,16 +550,16 @@ func TestMoveEntriesNameClash(t *testing.T) {
 	}
 }
 
-// TestMetaSurvivesSnapshot 验收项:元数据经快照(备份同款 VACUUM INTO)替换后仍在。
+// TestMetaSurvivesSnapshot 验收项:元数据与目录封面经快照(备份同款
+// VACUUM INTO)替换后仍在。
 func TestMetaSurvivesSnapshot(t *testing.T) {
 	db := newTestDB(t)
 	idA := mustFolder(t, db, "作品A")
-	ch1 := mustFileRow(t, db, row("第01话.zip", idA, true, "ready", 100, 200))
-	mustThumb(t, db, ch1)
 	note := "作者:某人"
-	if err := db.UpdateFolderMeta(idA, FolderMetaUpdate{Note: &note, Tags: []string{"科幻"}, Cover: &ch1}); err != nil {
+	if err := db.UpdateFolderMeta(idA, FolderMetaUpdate{Note: &note, Tags: []string{"科幻"}}); err != nil {
 		t.Fatal(err)
 	}
+	mustFolderCover(t, db, idA, CoverReady)
 
 	snap := fmt.Sprintf("%s-snap.db", db.Path)
 	if err := db.SnapshotTo(snap); err != nil {
@@ -536,11 +569,14 @@ func TestMetaSurvivesSnapshot(t *testing.T) {
 		t.Fatal(err)
 	}
 	m, err := db.GetFolderMeta(idA)
-	if err != nil || m.Note != note || !slices.Equal(m.Tags, []string{"科幻"}) || m.CoverFileID != ch1 {
+	if err != nil || m.Note != note || !slices.Equal(m.Tags, []string{"科幻"}) {
 		t.Fatalf("快照替换后元数据丢失: %+v %v", m, err)
 	}
+	if _, err := db.GetReadyFolderCover(idA); err != nil {
+		t.Fatalf("快照替换后目录封面引用丢失: %v", err)
+	}
 	s, err := db.FolderSummary(idA)
-	if err != nil || !slices.Equal(s.CoverFileIDs, []int64{ch1}) {
+	if err != nil || !s.CustomCover {
 		t.Fatalf("快照替换后封面链失效: %+v %v", s, err)
 	}
 }

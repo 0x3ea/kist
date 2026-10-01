@@ -30,6 +30,8 @@ export function GetCover(arg1:number):Promise<main.ThumbData>;
 
 export function GetFileMeta(arg1:number):Promise<index.FileMeta>;
 
+export function GetFolderCover(arg1:number):Promise<main.ThumbData>;
+
 export function GetFolderMeta(arg1:number):Promise<index.FolderMeta>;
 
 export function GetSettings():Promise<config.Settings>;
@@ -73,6 +75,8 @@ export function SearchAll(arg1:string,arg2:number):Promise<main.SearchView>;
 export function SetActiveDrive(arg1:string):Promise<void>;
 
 export function SetFileCover(arg1:number,arg2:string):Promise<boolean>;
+
+export function SetFolderCover(arg1:number,arg2:string):Promise<boolean>;
 
 export function SetNote(arg1:number,arg2:string):Promise<void>;
 

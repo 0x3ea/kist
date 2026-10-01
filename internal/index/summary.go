@@ -22,15 +22,17 @@ type FolderSummary struct {
 	TotalSize    int64   // 子树内明文大小合计
 	LatestAt     int64   // 子树内最新 modified_at,空子树为 0
 	PendingCount int     // 子树内 state=uploading 的文件数(出站箱待推,呼应 TODO-13)
-	CoverFileIDs []int64 // 封面三级回退链解析结果,≤4;0 = 该格渲染默认占位
+	CustomCover  bool    // 目录自有封面(folder_covers ready)存在即真,渲染端满铺;uploading 不可见,与文件侧一致
+	CoverFileIDs []int64 // 派生拼贴的子条目封面链,≤4;0 = 该格渲染默认占位。自有封面满铺时不看这里
 }
 
 // sumTree 是一次聚合查询的全部上下文:目录树、活跃文件索引、封面占有集。
 type sumTree struct {
-	root   *sumNode
-	byID   map[int64]*sumNode  // 活跃目录索引(含根)
-	files  map[int64]*fileLite // 活跃文件索引(封面引用悬空判定用)
-	covers map[int64]bool      // 有封面的 fileID 集(ready covers ∪ legacy thumbnails)
+	root         *sumNode
+	byID         map[int64]*sumNode  // 活跃目录索引(含根)
+	files        map[int64]*fileLite // 活跃文件索引
+	covers       map[int64]bool      // 有封面的 fileID 集(ready covers ∪ legacy thumbnails)
+	folderCovers map[int64]bool      // 有自有封面的 folderID 集(ready,uploading 不算)
 }
 
 // sumNode 是聚合用的内存树节点:只含活跃目录;祖先被软删的整支不参与
@@ -38,7 +40,6 @@ type sumTree struct {
 type sumNode struct {
 	id       int64
 	name     string
-	cover    int64      // folders.cover_file_id,0 = 未设置
 	children []*sumNode // 活跃子目录,名称序
 	files    []fileLite // 活跃文件,名称序
 }
@@ -59,25 +60,6 @@ func (db *DB) buildTree() (*sumTree, error) {
 	if err != nil {
 		return nil, err
 	}
-	// 封面引用原值一并取回(NULL → 0 = 未设置)
-	coverRows, err := db.Query(`SELECT id, COALESCE(cover_file_id, 0) FROM folders`)
-	if err != nil {
-		return nil, err
-	}
-	covers := map[int64]int64{}
-	for coverRows.Next() {
-		var id, c int64
-		if err := coverRows.Scan(&id, &c); err != nil {
-			coverRows.Close()
-			return nil, err
-		}
-		covers[id] = c
-	}
-	if err := coverRows.Err(); err != nil {
-		coverRows.Close()
-		return nil, err
-	}
-	coverRows.Close()
 
 	// 第一遍:为每个活跃目录建节点;父被软删的目录不挂树,整支不可见
 	nodes := map[int64]*sumNode{}
@@ -85,7 +67,7 @@ func (db *DB) buildTree() (*sumTree, error) {
 		if fi.deleted {
 			continue
 		}
-		nodes[id] = &sumNode{id: id, name: fi.name, cover: covers[id]}
+		nodes[id] = &sumNode{id: id, name: fi.name}
 	}
 	root := nodes[rootFolderID]
 	if root == nil {
@@ -151,7 +133,29 @@ func (db *DB) buildTree() (*sumTree, error) {
 	if err := coverRows2.Err(); err != nil {
 		return nil, err
 	}
-	return &sumTree{root: root, byID: nodes, files: fileIndex, covers: coverSet}, nil
+
+	// 目录自有封面占有集(ready;uploading 挂账中不可见,与文件侧同理)
+	folderCoverRows, err := db.Query(
+		`SELECT folder_id FROM folder_covers WHERE state = 'ready'`)
+	if err != nil {
+		return nil, err
+	}
+	defer folderCoverRows.Close()
+	folderCoverSet := map[int64]bool{}
+	for folderCoverRows.Next() {
+		var id int64
+		if err := folderCoverRows.Scan(&id); err != nil {
+			return nil, err
+		}
+		folderCoverSet[id] = true
+	}
+	if err := folderCoverRows.Err(); err != nil {
+		return nil, err
+	}
+	return &sumTree{
+		root: root, byID: nodes, files: fileIndex,
+		covers: coverSet, folderCovers: folderCoverSet,
+	}, nil
 }
 
 // agg 是自底向上的纯计数;封面链独立于计数单独解析。
@@ -234,37 +238,32 @@ func (db *DB) FolderSummaries(ids []int64) (map[int64]FolderSummary, error) {
 			TotalSize:    a.size,
 			LatestAt:     a.latest,
 			PendingCount: a.pending,
+			CustomCover:  t.folderCovers[n.id],
 			CoverFileIDs: t.resolveCover(n, coverMemo, repMemo),
 		}
 	}
 	return out, nil
 }
 
-// resolveCover 解析封面三级回退链,返回 ≤4 个 fileID:
+// resolveCover 解析派生拼贴(目录自有封面在 FolderSummary.CustomCover 单独
+// 报告,不经本函数),返回 ≤4 个 fileID:
 //
-//  1. 自定义封面:cover_file_id 指向的文件活跃且有缩略图 → 单值满铺;
-//     引用悬空(文件已软删/不在树上/无缩略图)→ 落第 2 级;
-//  2. 派生拼贴:直接子条目(目录与文件)名称自然序的前四个,每格取该子条目的
-//     封面——子文件看缩略图,子目录递归取其自定义封面或子树内首个有缩略图的
-//     文件;无封面的子条目不跳过,该格记 0(位置即信息,第几格空缺一目了然),
+//  1. 派生拼贴:直接子条目(目录与文件)名称自然序的前四个,每格取该子条目的
+//     封面——子文件看缩略图,子目录递归取子树内首个有缩略图的文件;
+//     无封面的子条目不跳过,该格记 0(位置即信息,第几格空缺一目了然),
 //     子条目不足四个时尾部留白(返回值变短)。派生只产"宫格":唯一子条目的
-//     单槽一律回落空切片——满铺语义专属自定义封面,否则 A 只含子目录 B 时,
+//     单槽一律回落空切片——满铺语义专属自有封面,否则 A 只含子目录 B 时,
 //     A 会顶着 B 里首个文件的封面,读起来像"该目录就是这个文件";
-//  3. 默认四格:无任何子条目时返回空切片,由渲染端按目录名 hash 稳定挑内置占位图,
+//     子目录的自有封面不进拼贴格:CoverFileIDs 是 fileID 协议(前端按文件
+//     取字节),目录封面字节走 GetFolderCover 另一条路,协议混不进来。
+//  2. 默认四格:无任何子条目时返回空切片,由渲染端按目录名 hash 稳定挑内置占位图,
 //     渲染期决定、零存储。
 func (t *sumTree) resolveCover(n *sumNode, memo map[int64][]int64, repMemo map[int64]int64) []int64 {
-	// 第 1 级:cover_file_id 有效(活跃 + 有封面)即单图满铺
-	if n.cover > 0 {
-		if f := t.files[n.cover]; f != nil && t.covers[f.id] {
-			return []int64{n.cover}
-		}
-		// 引用悬空:继续走派生级
-	}
-	// 第 3 级边界:空作品交给渲染端
+	// 第 2 级边界:空作品交给渲染端
 	if len(n.children)+len(n.files) == 0 {
 		return []int64{}
 	}
-	// 第 2 级:混合名称序取前四个子条目
+	// 第 1 级:混合名称序取前四个子条目
 	if ids, ok := memo[n.id]; ok {
 		return ids
 	}
@@ -300,25 +299,18 @@ func (t *sumTree) resolveCover(n *sumNode, memo map[int64][]int64, repMemo map[i
 	return ids
 }
 
-// representative 找目录的"代表文件":自定义封面优先,否则先本目录文件、
-// 再子目录递归(各自名称序,先文件后目录的先序),取第一个有封面的文件;
-// 都没有则 0。纯名称序保证两次解析结果一致,与扫描定序同理。
+// representative 找目录的"代表文件":先本目录文件、再子目录递归(各自
+// 名称序,先文件后目录的先序),取第一个有封面的文件;都没有则 0。
+// 纯名称序保证两次解析结果一致,与扫描定序同理。
 func (t *sumTree) representative(n *sumNode, memo map[int64]int64) int64 {
 	if id, ok := memo[n.id]; ok {
 		return id
 	}
 	id := int64(0)
-	if n.cover > 0 {
-		if f := t.files[n.cover]; f != nil && t.covers[f.id] {
-			id = n.cover
-		}
-	}
-	if id == 0 {
-		for _, f := range n.files {
-			if t.covers[f.id] {
-				id = f.id
-				break
-			}
+	for _, f := range n.files {
+		if t.covers[f.id] {
+			id = f.id
+			break
 		}
 	}
 	if id == 0 {
