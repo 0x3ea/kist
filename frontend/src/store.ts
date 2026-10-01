@@ -435,6 +435,32 @@ export async function activateDrive(id: string): Promise<boolean> {
 
 // ---- Files 页 ----
 
+/** 普通点击的选区语义:唯一选中(替换整个选区,文件/目录分侧归位)。
+ * 详情面板的开合与双击判定由调用方编排——这里只管选区。 */
+export function selectOnly(entry: { IsFolder: boolean; ID: number }): void {
+  store.selection.clear()
+  store.folderSelection.clear()
+  ;(entry.IsFolder ? store.folderSelection : store.selection).add(entry.ID)
+}
+
+/** Ctrl/⌘+点击的多选语义:切换该条目选中态,不清其余、不动详情面板
+ * (多选时面板跟 flash 没有意义);文件侧清到空时顺手收起文件详情。
+ * 目录侧免 250ms 双击判定——多选态下按住 Ctrl 不会是想双击进入。 */
+export function ctrlToggleSelect(entry: { IsFolder: boolean; ID: number }): void {
+  const sel = entry.IsFolder ? store.folderSelection : store.selection
+  if (sel.has(entry.ID)) {
+    sel.delete(entry.ID)
+    if (!entry.IsFolder && store.selection.size === 0) store.detail = null
+  } else {
+    sel.add(entry.ID)
+  }
+}
+
+/** 判断点击是否处于多选态(Ctrl 按住;⌘ 是 mac 惯例,顺手兼容) */
+export function isMultiSelectClick(ev: MouseEvent): boolean {
+  return ev.ctrlKey || ev.metaKey
+}
+
 export async function loadFolder(id: number) {
   try {
     const v = await API.ListFolder(id)

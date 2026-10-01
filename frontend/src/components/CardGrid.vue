@@ -6,7 +6,17 @@
 // TODO-10 出库后封面可能走网络:全量预取改为 IntersectionObserver 可见优先
 // (rootMargin 提前 200px ≈ 预取一屏),实际并发由 store 的有界队列限制。
 import { index } from '../../wailsjs/go/models'
-import { store, ensureFolderCover, ensureThumb, openDetail, openFolderDetail, summaryText } from '../store'
+import {
+  store,
+  ensureFolderCover,
+  ensureThumb,
+  openDetail,
+  openFolderDetail,
+  summaryText,
+  selectOnly,
+  ctrlToggleSelect,
+  isMultiSelectClick,
+} from '../store'
 import { humanSize } from '../format'
 import { fileKind } from '../fileIcon'
 import CoverMosaic from './CoverMosaic.vue'
@@ -62,9 +72,14 @@ function toggleFile(id: number) {
   store.selection.has(id) ? store.selection.delete(id) : store.selection.add(id)
 }
 
-function cardClick(e: index.Entry) {
+// 文件卡点击:Ctrl/⌘ = 多选切换(不动面板);普通 = 唯一选中 + 详情
+function cardClick(ev: MouseEvent, e: index.Entry) {
   if (e.IsFolder) return
-  toggleFile(e.ID)
+  if (isMultiSelectClick(ev)) {
+    ctrlToggleSelect(e)
+    return
+  }
+  selectOnly(e)
   openDetail(e.ID)
 }
 
@@ -72,9 +87,20 @@ function cardClick(e: index.Entry) {
 // 双击 = 进入。双击前必先落一次 click:第一击挂 250ms 判定,窗口内的第二击
 // 取消判定并交由 dblclick——否则每次双击都会先闪一次面板再导航。
 // 判定到点后目录已不在当前列表(切目录/已删)时 openFolderDetail 自会放弃。
+// Ctrl/⌘+点击 = 多选切换:立即生效免判定,不动面板。
 let folderClickTimer: ReturnType<typeof setTimeout> | null = null
 
-function folderClick(id: number) {
+function folderClick(ev: MouseEvent, id: number) {
+  // Ctrl/⌘+点击 = 多选切换:立即生效免判定,不动面板;先撤挂起的普通单击
+  // 判定——不撤的话它到点会清空选区,把这次多选悄悄抹掉
+  if (isMultiSelectClick(ev)) {
+    if (folderClickTimer) {
+      clearTimeout(folderClickTimer)
+      folderClickTimer = null
+    }
+    ctrlToggleSelect({ IsFolder: true, ID: id })
+    return
+  }
   if (folderClickTimer) {
     clearTimeout(folderClickTimer)
     folderClickTimer = null
@@ -106,7 +132,7 @@ function folderDblClick(id: number) {
       :ref="registerCard(e)"
       class="card"
       :class="{ sel: e.IsFolder ? store.folderSelection.has(e.ID) : store.selection.has(e.ID) }"
-      @click="e.IsFolder ? folderClick(e.ID) : cardClick(e)"
+      @click="e.IsFolder ? folderClick($event, e.ID) : cardClick($event, e)"
       @dblclick="e.IsFolder && folderDblClick(e.ID)"
       @contextmenu.prevent="$emit('menu', $event, e)"
     >

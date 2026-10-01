@@ -1,10 +1,11 @@
 <script setup lang="ts">
 // FileTable.vue — 列表视图:目录行显示子树摘要(CLI ls 同款),文件行显示
 // 大小/时间/状态;类型列用共享 fileKind 图标,uploading 标"待上传"。
-// 目录行交互:单击 = 唯一选中 + 右栏元数据,双击 = 进入(名称链接保留为
-// 即时进入的捷径);文件行单击 = 切换选中 + 右栏详情,与原先一致。
+// 条目点击(目录与文件同款约定):普通单击 = 唯一选中 + 右栏详情(目录双击
+// = 进入,名称链接保留为即时进入的捷径);Ctrl/⌘+单击 = 多选切换,不清
+// 其余、不动面板,目录侧立即生效免双击判定。
 import { index } from '../../wailsjs/go/models'
-import { store, summaryText, openDetail, openFolderDetail } from '../store'
+import { store, summaryText, openDetail, openFolderDetail, selectOnly, ctrlToggleSelect, isMultiSelectClick } from '../store'
 import { humanSize, shortTime } from '../format'
 import { fileKind, folderKind } from '../fileIcon'
 
@@ -19,9 +20,13 @@ function toggleFolder(id: number) {
   store.folderSelection.has(id) ? store.folderSelection.delete(id) : store.folderSelection.add(id)
 }
 
-function onRowClick(e: index.Entry) {
+function onRowClick(ev: MouseEvent, e: index.Entry) {
   if (e.IsFolder) return
-  toggleFile(e.ID)
+  if (isMultiSelectClick(ev)) {
+    ctrlToggleSelect(e)
+    return
+  }
+  selectOnly(e)
   openDetail(e.ID)
 }
 
@@ -30,7 +35,17 @@ function onRowClick(e: index.Entry) {
 // 判定到点后目录已不在当前列表(切目录/已删)时 openFolderDetail 自会放弃。
 let folderClickTimer: ReturnType<typeof setTimeout> | null = null
 
-function folderClick(id: number) {
+function folderClick(ev: MouseEvent, id: number) {
+  // Ctrl/⌘+点击 = 多选切换:立即生效免判定;先撤挂起的普通单击判定,
+  // 不撤的话它到点会清空选区,把这次多选悄悄抹掉
+  if (isMultiSelectClick(ev)) {
+    if (folderClickTimer) {
+      clearTimeout(folderClickTimer)
+      folderClickTimer = null
+    }
+    ctrlToggleSelect({ IsFolder: true, ID: id })
+    return
+  }
   if (folderClickTimer) {
     clearTimeout(folderClickTimer)
     folderClickTimer = null
@@ -38,7 +53,7 @@ function folderClick(id: number) {
   }
   folderClickTimer = setTimeout(() => {
     folderClickTimer = null
-    // 单击 = 唯一选中(多选走勾选框,与右键菜单同语义),右栏展示元数据
+    // 单击 = 唯一选中(多选走 Ctrl+单击/勾选框),右栏展示元数据
     store.selection.clear()
     store.folderSelection.clear()
     store.folderSelection.add(id)
@@ -77,7 +92,7 @@ function stateTag(e: index.Entry): string {
         v-for="e in store.folder.entries"
         :key="e.ID"
         :class="{ sel: e.IsFolder ? store.folderSelection.has(e.ID) : store.selection.has(e.ID) }"
-        @click="e.IsFolder ? folderClick(e.ID) : onRowClick(e)"
+        @click="e.IsFolder ? folderClick($event, e.ID) : onRowClick($event, e)"
         @dblclick="e.IsFolder && folderDblClick(e.ID)"
         @contextmenu.prevent="$emit('menu', $event, e)"
       >
