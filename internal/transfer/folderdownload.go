@@ -77,11 +77,12 @@ func (m *Manager) planFolderTree(folderID int64, destDir string, taken map[strin
 }
 
 // enqueueDownloadSpec 入队一次下载任务。name 允许是子树相对路径(纯显示用)。
+// BytesTotal 只计网络字节(密文):与上传同口径,本地解密/解压不进预算。
 func (m *Manager) enqueueDownloadSpec(ctx context.Context, s downloadSpec, keepZip bool) {
 	jctx, cancel := context.WithCancel(ctx)
 	id := newHexID()
 	j := &job{ctx: jctx, cancel: cancel, file: s.file, destDir: s.destDir, keepZip: keepZip}
 	j.tr = &Transfer{ID: id, Kind: "download", Name: s.name, UUID: s.file.UUID, Phase: PhaseQueued,
-		BytesTotal: s.file.Size + s.file.CipherSize, StartedAt: time.Now().Unix()}
+		BytesTotal: s.file.CipherSize, StartedAt: time.Now().Unix()}
 	m.add(j)
 }

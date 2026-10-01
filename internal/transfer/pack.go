@@ -40,7 +40,6 @@ type packRoot struct {
 	Name       string
 	RelSegs    []string // 相对 put 根的自身目录段;根 pack 为空
 	Files      int
-	Bytes      int64
 	Mtime      int64
 	FirstImage string // 词法序第一张图(封面候选);无图为空
 }
@@ -50,7 +49,6 @@ type looseFile struct {
 	Name    string
 	RelSegs []string // 相对 put 根,末段为文件名
 	Mtime   int64
-	Bytes   int64
 }
 
 // parentSegs 返回目录段(末段是条目自身时取其父)。
@@ -78,7 +76,6 @@ func planPackTree(root string) (packPlan, error) {
 		abs   string
 		rel   string // slash 相对路径
 		mtime int64
-		bytes int64
 	}
 	var files []fileStat
 	var bad []string
@@ -122,7 +119,7 @@ func planPackTree(root string) (packPlan, error) {
 			return nil
 		}
 		dirs[path.Dir(slash)].hasFile = true
-		files = append(files, fileStat{abs: fp, rel: slash, mtime: fi.ModTime().Unix(), bytes: fi.Size()})
+		files = append(files, fileStat{abs: fp, rel: slash, mtime: fi.ModTime().Unix()})
 		return nil
 	})
 	if err != nil {
@@ -160,14 +157,13 @@ func planPackTree(root string) (packPlan, error) {
 	for _, f := range files {
 		if pr, ok := packByDir[path.Dir(f.rel)]; ok {
 			pr.Files++
-			pr.Bytes += f.bytes
 			if pr.FirstImage == "" && isImagePath(f.rel) {
 				pr.FirstImage = f.abs
 			}
 			continue
 		}
 		plan.Loose = append(plan.Loose, looseFile{AbsPath: f.abs, Name: path.Base(f.rel),
-			RelSegs: splitSegments(f.rel), Mtime: f.mtime, Bytes: f.bytes})
+			RelSegs: splitSegments(f.rel), Mtime: f.mtime})
 	}
 	for rel, pr := range packByDir {
 		if rel == "." {
@@ -223,7 +219,8 @@ func packUserMeta(origBytes int64, entries int) string {
 // 单遍流式,内存 ≈ 一个块。条目全部用 Store(主载体 jpg/png 已压缩,
 // 无收益,省 CPU);每个目录写显式条目,空目录得以往返保留。
 // 返回(文件数, 原始字节, 首张图片路径)。取消点在每个读取块。
-func writePackZip(ctx context.Context, w io.Writer, dir string, prog func(int64)) (int, int64, string, error) {
+// 不报进度:加密阶段是本地工作,进度条只计随后的网络字节。
+func writePackZip(ctx context.Context, w io.Writer, dir string) (int, int64, string, error) {
 	zw := zip.NewWriter(w)
 	var entries int
 	var bytes int64
@@ -278,9 +275,6 @@ func writePackZip(ctx context.Context, w io.Writer, dir string, prog func(int64)
 					return werr
 				}
 				bytes += int64(n)
-				if prog != nil {
-					prog(bytes)
-				}
 			}
 			if rerr == io.EOF {
 				return nil

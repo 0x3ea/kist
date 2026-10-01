@@ -19,6 +19,10 @@ import (
 // 源有两种(TODO-15):普通文件;目录打包任务——zip 流直挂 BlobWriter,
 // 单遍流式,不落中间 zip。取消点:加密每个读取块、每次 PUT 请求(dav
 // 层 ctx)、索引写入前。
+// 进度口径:只计网络字节(total = 密文大小,done = PUT 已发)。加密是
+// 本地工作不计入——此前"明文+密文"双份计数让传输大小显示为实际的两倍
+// (GUI 实测反馈);加密期间 total=0,前端对 running 且 total=0 的条目走
+// indeterminate 动画,阶段标签「加密中」仍在报状态。
 func (m *Manager) runUpload(j *job) error {
 	ctx := j.ctx
 	tr := j.tr
@@ -59,10 +63,7 @@ func (m *Manager) runUpload(j *job) error {
 	singleSize := int64(0)
 
 	if j.pack {
-		m.setTotal(tr, j.sizeHint) // 先按源文件总字节预估,Close 后改为准确值
-		packEntries, packOrigBytes, packFirstImage, err = writePackZip(ctx, bw, j.srcPath, func(done int64) {
-			m.setProgress(tr, done)
-		})
+		packEntries, packOrigBytes, packFirstImage, err = writePackZip(ctx, bw, j.srcPath)
 		if err != nil {
 			out.Close()
 			return err
@@ -85,10 +86,8 @@ func (m *Manager) runUpload(j *job) error {
 			return fmt.Errorf("transfer: %s 是目录(应由 UploadPaths 展开)", j.srcPath)
 		}
 		singleSize = st.Size()
-		m.setTotal(tr, singleSize) // 先按明文计,加密完成后改为明文+密文
 
 		buf := make([]byte, 1<<20)
-		var done int64
 		for {
 			if err := ctx.Err(); err != nil { // 取消点:每 MiB
 				src.Close()
@@ -102,8 +101,6 @@ func (m *Manager) runUpload(j *job) error {
 					out.Close()
 					return werr
 				}
-				done += int64(n)
-				m.setProgress(tr, done)
 			}
 			if rerr == io.EOF {
 				break
@@ -131,7 +128,7 @@ func (m *Manager) runUpload(j *job) error {
 		return err
 	}
 	cipherSize := cipherSt.Size()
-	m.setTotal(tr, int64(meta.OrigSize)+cipherSize) // 进度总数 = 加密字节 + 上传字节
+	m.setTotal(tr, cipherSize) // 进度只计网络字节:total = 密文大小(加密阶段 total=0 走 indeterminate)
 
 	// ---- 阶段二:缩略图(仅图片与 epub;任何失败只忽略,绝不阻断上传)----
 	// pack 用词法序第一页做封面(TODO-15);无图的 pack 不生成。
@@ -158,8 +155,7 @@ func (m *Manager) runUpload(j *job) error {
 	var cover *coverOut
 	if thumb != nil {
 		if c, cerr := m.encryptCoverArtifact(mk, *thumb, tmpDir); cerr == nil {
-			cover = c
-			m.setTotal(tr, int64(meta.OrigSize)+cipherSize+cover.size)
+			cover = c // ≤128KB 的小对象,不进进度预算(计入会让 total 与文件大小对不上)
 		} else {
 			slog.Warn("封面加密失败,本次不带封面", "path", thumbSrc, "err", cerr)
 		}
@@ -197,23 +193,21 @@ func (m *Manager) runUpload(j *job) error {
 		return err
 	}
 	err = m.remoteSnapshot().PutBlob(ctx, blobName, bf, func(sent int64) {
-		m.setProgress(tr, int64(meta.OrigSize)+sent)
+		m.setProgress(tr, sent)
 	})
 	bf.Close()
 	if err != nil {
 		return err
 	}
 
-	// 封面 PUT(小对象,紧跟文件)。derived 封面尽力而为:失败降级为
-	// "本次无封面",绝不因此判整个上传失败——文件本体才是用户所求。
+	// 封面 PUT(小对象,紧跟文件,≤128KB 不报进度)。derived 封面尽力而为:
+	// 失败降级为"本次无封面",绝不因此判整个上传失败——文件本体才是用户所求。
 	if cover != nil {
 		cf, err := os.Open(cover.path)
 		if err != nil {
 			return err
 		}
-		err = m.remoteSnapshot().PutCoverBlob(ctx, cover.name, cf, func(sent int64) {
-			m.setProgress(tr, int64(meta.OrigSize)+cipherSize+sent)
-		})
+		err = m.remoteSnapshot().PutCoverBlob(ctx, cover.name, cf, nil)
 		cf.Close()
 		if err != nil {
 			slog.Warn("封面上传失败,本次不带封面", "name", j.desiredName, "err", err)

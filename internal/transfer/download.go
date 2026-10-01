@@ -13,6 +13,9 @@ import (
 
 // runDownload 单文件下载管线:GET 到临时文件 → 流式解密到 .part →
 // 校验通过后原子落盘。失败/取消不留半截文件。
+// 进度口径与上传对称:只计网络字节(total = 密文大小,done = GET 已收)。
+// 解密/解压是本地收尾,GET 完成时进度条已满,阶段标签「解密中」继续报状态
+// ——此前"密文+明文"双份计数让传输大小显示为实际的两倍。
 func (m *Manager) runDownload(j *job) error {
 	ctx := j.ctx
 	tr := j.tr
@@ -79,8 +82,6 @@ func (m *Manager) runDownload(j *job) error {
 		return err
 	}
 	buf := make([]byte, 1<<20)
-	var delivered int64
-	base := f.CipherSize // 下载阶段已累计的进度基准
 	for {
 		if err := ctx.Err(); err != nil { // 取消点:每 MiB
 			part.Close()
@@ -92,8 +93,6 @@ func (m *Manager) runDownload(j *job) error {
 				part.Close()
 				return werr
 			}
-			delivered += int64(n)
-			m.setProgress(tr, base+delivered)
 		}
 		if rerr == io.EOF {
 			break // EOF 内含终检:长度、SHA-256 全通过才会到这里

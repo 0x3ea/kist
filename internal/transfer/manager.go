@@ -71,9 +71,8 @@ type job struct {
 	desiredName string
 	folderID    int64
 	mtime       int64
-	deferred    bool  // 上传任务止于"记账+产物入出站箱",不发 PUT(TODO-13)
-	pack        bool  // 目录打包任务(TODO-15):源是目录,zip 流直挂 BlobWriter
-	sizeHint    int64 // pack:源文件总字节(进度预估;准确值以加密结果为准)
+	deferred    bool // 上传任务止于"记账+产物入出站箱",不发 PUT(TODO-13)
+	pack        bool // 目录打包任务(TODO-15):源是目录,zip 流直挂 BlobWriter
 	// 下载/push
 	file        index.FileRow
 	cover       *index.CoverRow       // push 任务的封面账(TODO-10):非 nil 时按封面账处理
@@ -187,7 +186,7 @@ func (m *Manager) uploadPaths(ctx context.Context, paths []string, destFolderID 
 		}
 		if !st.IsDir() {
 			m.enqueueUploadSpec(ctx, uploadSpec{src: p, name: st.Name(), folder: destFolderID,
-				mtime: st.ModTime().Unix(), sizeHint: st.Size()}, deferred)
+				mtime: st.ModTime().Unix()}, deferred)
 			queued++
 			continue
 		}
@@ -283,7 +282,7 @@ func (m *Manager) expandFolder(ctx context.Context, p string, destFolderID int64
 			folderID = folderIDs[base+"/"+filepath.ToSlash(dir)]
 		}
 		m.enqueueUploadSpec(ctx, uploadSpec{src: fp, name: fi.Name(), folder: folderID,
-			mtime: fi.ModTime().Unix(), sizeHint: fi.Size()}, deferred)
+			mtime: fi.ModTime().Unix()}, deferred)
 		queued++
 		return nil
 	})
@@ -338,17 +337,17 @@ func (m *Manager) packFolder(ctx context.Context, p string, destFolderID int64, 
 	queued := 0
 	if rp := plan.RootPack; rp != nil {
 		m.enqueueUploadSpec(ctx, uploadSpec{src: rp.AbsDir, name: rp.Name, folder: destFolderID,
-			mtime: rp.Mtime, pack: true, sizeHint: rp.Bytes}, deferred)
+			mtime: rp.Mtime, pack: true}, deferred)
 		queued++
 	}
 	for _, pr := range plan.Packs {
 		m.enqueueUploadSpec(ctx, uploadSpec{src: pr.AbsDir, name: pr.Name,
-			folder: folderOf(parentSegs(pr.RelSegs)), mtime: pr.Mtime, pack: true, sizeHint: pr.Bytes}, deferred)
+			folder: folderOf(parentSegs(pr.RelSegs)), mtime: pr.Mtime, pack: true}, deferred)
 		queued++
 	}
 	for _, lf := range plan.Loose {
 		m.enqueueUploadSpec(ctx, uploadSpec{src: lf.AbsPath, name: lf.Name,
-			folder: folderOf(parentSegs(lf.RelSegs)), mtime: lf.Mtime, sizeHint: lf.Bytes}, deferred)
+			folder: folderOf(parentSegs(lf.RelSegs)), mtime: lf.Mtime}, deferred)
 		queued++
 	}
 	return queued, nil
@@ -430,20 +429,18 @@ func (m *Manager) DownloadEntriesTo(ctx context.Context, fileIDs, folderIDs []in
 
 // uploadSpec 是一次上传任务的入队描述(普通文件与 pack 共用)。
 type uploadSpec struct {
-	src      string
-	name     string
-	folder   int64
-	mtime    int64
-	pack     bool
-	sizeHint int64
+	src    string
+	name   string
+	folder int64
+	mtime  int64
+	pack   bool
 }
 
 func (m *Manager) enqueueUploadSpec(ctx context.Context, s uploadSpec, deferred bool) {
 	jctx, cancel := context.WithCancel(ctx)
 	id := newHexID()
 	j := &job{ctx: jctx, cancel: cancel, srcPath: s.src, desiredName: s.name,
-		folderID: s.folder, mtime: s.mtime, deferred: deferred,
-		pack: s.pack, sizeHint: s.sizeHint}
+		folderID: s.folder, mtime: s.mtime, deferred: deferred, pack: s.pack}
 	j.tr = &Transfer{ID: id, Kind: "upload", Name: s.name, Phase: PhaseQueued,
 		BytesTotal: 0, StartedAt: time.Now().Unix()}
 	m.add(j)

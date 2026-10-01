@@ -186,7 +186,7 @@ func TestPackZipRoundtrip(t *testing.T) {
 	}
 
 	var buf bytes.Buffer
-	entries, raw, _, err := writePackZip(context.Background(), &buf, root, nil)
+	entries, raw, _, err := writePackZip(context.Background(), &buf, root)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -225,7 +225,7 @@ func TestPackZipCancel(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 	var buf bytes.Buffer
-	if _, _, _, err := writePackZip(ctx, &buf, root, nil); err == nil {
+	if _, _, _, err := writePackZip(ctx, &buf, root); err == nil {
 		t.Fatal("已取消的 ctx 应使打包失败")
 	}
 }
