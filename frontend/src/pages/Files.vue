@@ -45,6 +45,17 @@ const metaTarget = ref<{ mode: 'folder' | 'file'; id: number; name: string; pack
 
 const selTotal = computed(() => store.selection.size + store.folderSelection.size)
 
+// 选中计数(面包屑栏右侧):零选不占位;文件/目录分侧计数,混选时都给
+// ——右键菜单的批量动作(移动/删除)按这个数决定禁用态,常驻可见可对账
+const selCountText = computed(() => {
+  const f = store.selection.size
+  const d = store.folderSelection.size
+  if (f && d) return `已选 ${f} 文件、${d} 文件夹`
+  if (f) return `已选 ${f} 个文件`
+  if (d) return `已选 ${d} 个文件夹`
+  return ''
+})
+
 function onSearch(q: string) {
   query.value = q
   searchDebounced(q)
@@ -214,6 +225,7 @@ const ctxItems = computed<CtxItem[]>(() => {
           </span>
           <span v-if="i < store.folder.crumbs.length - 1" class="sep">/</span>
         </template>
+        <span v-if="selCountText" class="sel-count">{{ selCountText }}</span>
       </div>
       <div class="body">
         <div class="list-wrap">
@@ -299,6 +311,14 @@ const ctxItems = computed<CtxItem[]>(() => {
 
 .sep {
   opacity: 0.5;
+}
+
+/* 选中计数:margin-left:auto 推到行尾,出现/消失不挪动左侧面包屑 */
+.sel-count {
+  margin-left: auto;
+  color: var(--accent);
+  font-size: 12px;
+  white-space: nowrap;
 }
 
 .body {
