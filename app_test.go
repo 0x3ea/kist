@@ -116,6 +116,15 @@ func TestWrapCodedError(t *testing.T) {
 	}
 }
 
+// TestPickDirsNotReady ctx 未注入(窗口未就绪)时应返回 INTERNAL,不触碰对话框。
+// 多选/取消行为依赖真实窗口,由 GUI 手工验收覆盖(docs/todo/23)。
+func TestPickDirsNotReady(t *testing.T) {
+	a := NewApp()
+	if _, err := a.PickDirs(); err == nil || !strings.HasPrefix(err.Error(), "[INTERNAL]") {
+		t.Fatalf("未就绪应报 INTERNAL,得到 %v", err)
+	}
+}
+
 // TestListFolderComposite 合成视图:面包屑 + 条目(目录在前)+ 子目录摘要批量。
 func TestListFolderComposite(t *testing.T) {
 	a := newTestApp(t)

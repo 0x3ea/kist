@@ -50,6 +50,8 @@ export function MoveEntries(arg1:Array<number>,arg2:Array<number>,arg3:number):P
 
 export function PickDir():Promise<string>;
 
+export function PickDirs():Promise<Array<string>>;
+
 export function PickFiles():Promise<Array<string>>;
 
 export function PickImageFile():Promise<string>;

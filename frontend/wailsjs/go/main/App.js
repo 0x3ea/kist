@@ -90,6 +90,10 @@ export function PickDir() {
   return window['go']['main']['App']['PickDir']();
 }
 
+export function PickDirs() {
+  return window['go']['main']['App']['PickDirs']();
+}
+
 export function PickFiles() {
   return window['go']['main']['App']['PickFiles']();
 }

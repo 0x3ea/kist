@@ -45,3 +45,5 @@ require (
 	modernc.org/mathutil v1.7.1 // indirect
 	modernc.org/memory v1.11.0 // indirect
 )
+
+replace github.com/wailsapp/wails/v2 => github.com/0x3ea/wails/v2 v2.15.0-kist.1

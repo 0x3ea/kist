@@ -1,5 +1,7 @@
 # Makefile — 统一封装 wails 命令的 -tags webkit2_41(Arch 仓库已无 webkit2gtk-4.0,
 # tag 恒必带;对 Windows 交叉编译目标无影响)。go 命令不需要该 tag。
+# 注意:wails CLI 必须装官方版(go install ...@v2.15.0)——go.mod 的 replace 只影响
+# 库依赖(fork:0x3ea/wails tag v2.15.0-kist.1,见 CLAUDE.md CI/CD 节),CLI 是独立二进制。
 
 TAGS := -tags webkit2_41
 

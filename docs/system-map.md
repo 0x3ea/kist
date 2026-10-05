@@ -9,7 +9,7 @@
 ## 1. 一图流
 
 ```
-cmd/kistctl(CLI 壳,1440 行)        main.go+app*.go(Wails GUI 壳,Phase 7:31 个绑定 + 四页面)
+cmd/kistctl(CLI 壳,1440 行)        main.go+app*.go(Wails GUI 壳,Phase 7:36 个绑定 + 四页面)
         │                                   │
         └────────────┬──────────────────────┘
                      ▼
@@ -54,7 +54,7 @@ cmd/kistctl(CLI 壳,1440 行)        main.go+app*.go(Wails GUI 壳,Phase 7:31 �
 | logging | 58 | slog → KIST_HOME/kist.log,启动轮转留一代 | `logging.go` |
 | audit | 90 | 操作审计(TODO-14):每条 CLI 命令恰好一行 JSONL 落 audit.log(ts/cmd/ok/code/dur_ms/extra),main 单点收口;append-only 长留存不轮转,写失败不阻断命令 | `audit.go` |
 | cmd/kistctl | ~1900 | CLI 壳:20 个子命令、口令获取、参数重排、虚拟路径 | `main.go` |
-| 根 main/app | ~1770 | Wails GUI 壳(Phase 7):35 个绑定方法、多盘库生命周期(reopenVaultLocked)、事件转发、防抖自动备份、退出前备份;四页面 vue-ts ~2.4k 行(手写 CSS,零新前端依赖) | `app.go`(状态/解锁/多盘生命周期)、`app_browse.go`(浏览/元数据)、`app_transfer.go`(传输/维护)、`main.go`、`frontend/src/` |
+| 根 main/app | ~1770 | Wails GUI 壳(Phase 7):36 个绑定方法、多盘库生命周期(reopenVaultLocked)、事件转发、防抖自动备份、退出前备份;四页面 vue-ts ~2.4k 行(手写 CSS,零新前端依赖) | `app.go`(状态/解锁/多盘生命周期)、`app_browse.go`(浏览/元数据)、`app_transfer.go`(传输/维护)、`main.go`、`frontend/src/` |
 
 核心代码约 6.8k 行(不含测试,另含 GUI 壳 ~1300 行),全仓 Go 约 12.1k 行。**transfer + index + crypto + dav 四个包占核心的 85%**,掌控它们即掌控项目。
 
@@ -64,14 +64,14 @@ GUI 是纯壳:**零业务逻辑,只编排 internal/***。与 CLI 的关系是同
 
 **App 结构**(`app.go`):`mu` 保护 cfg/store/mk/unlocked/backupTimer/lastBackupRev;`db`/`mgr` 按活动盘构造(TODO-21:换盘 = `reopenVaultLocked` 关旧库开新库 + 重建管线,要求空闲;恢复仍走 `index.ReplaceWith` 原句柄换库)。MK 经 `mkSnapshot()` 闭包注入管线,未解锁返回 false → 任务以 LOCKED 失败。
 
-**绑定分组**(35 个,全部 `defer panicGuard` 防 panic 崩窗口,错误出口统一 `wrap`):
+**绑定分组**(36 个,全部 `defer panicGuard` 防 panic 崩窗口,错误出口统一 `wrap`):
 
 | 分组 | 方法 | 说明 |
 |---|---|---|
 | 状态/解锁 | GetAppState / Get·SaveWebDAVConfig / TestConnection / CreateAccount / Unlock / ImportFromRemote / Lock / ChangePassphrase / SyncConflictDetail / ResolveConflict | AppState 含 HasLocalKeyfile(Lock 页三分支判定)+ 当前盘名/盘数;Unlock 成功即后台跑启动对账(见下);SyncConflictDetail 按需拉冲突详情(整拉远端索引,三方局面 + diff);ResolveConflict 裁决前重检 expectRemoteRev,远端已变返回 resolved=false 由前端刷新重裁决;CreateAccount 本地已有 keyfile 时走"开新库"分支(推现有 keyfile,口令不符 AUTH_FAILED);ChangePassphrase 多盘扇出 keyfile |
 | 多盘档案(TODO-21) | ListDrives / SaveDrive / DeleteDrive / SetActiveDrive | SaveDrive 编辑活动盘热更新客户端(SetRemote),新增走查重(URL+用户名+根目录);DeleteDrive 拒绝活动盘与最后一个盘,本地索引文件保留;SetActiveDrive 要求管线空闲、切走前尽力补备份、保持解锁态,发 `drive:switched` |
 | 浏览 | ListFolder / SearchAll / FileInfo / GetCover / SetFileCover / GetFolderCover / SetFolderCover / SetNote / SetUserMeta / DeleteEntries / EnsureFolder / MoveEntries / Get·UpdateFolderMeta | ListFolder 绑定层合成面包屑+条目+FolderSummaries(一次往返);FileDetail 是摊平 NullInt64 的 DTO;GetCover 三级来源:磁盘 LRU 缓存(键=文件 uuid)→ 远端 covers 命名空间(需解锁,[LOCKED])→ legacy thumbnails 回退;GetFolderCover(v6)同款但无 legacy 回退,缓存键=目录 uuid;SetFileCover/SetFolderCover 导入走 ImportCover/ImportFolderCover(断网回退出站箱返回 deferred,notify 提示)、清除纯索引零网络;UpdateFolderMeta 直传指针语义(nil=不动/零值=清除);MoveEntries 文件+目录混合移动(语义见不变量 17) |
-| 传输 | PickFiles / PickDir / UploadPaths / DownloadEntries / CancelTransfer / Transfers | 对话框在 Go 侧(v2.15 JS 运行时无 Open*Dialog);上传默认 pack、下载默认解压,不暴露 expand/keepZip;DownloadEntries 文件+目录同收(返回 DownloadPlan{queued,skipped}) |
+| 传输 | PickFiles / PickDir / PickDirs / UploadPaths / DownloadEntries / CancelTransfer / Transfers | 对话框在 Go 侧(v2.15 JS 运行时无 Open*Dialog);PickDirs 多选目录走 fork 的 OpenMultipleDirectoriesDialog(TODO-23,go.mod replace `0x3ea/wails` tag `v2.15.0-kist.1`;取消契约三端统一"空表+nil"),上传默认 pack、下载默认解压,不暴露 expand/keepZip;DownloadEntries 文件+目录同收(返回 DownloadPlan{queued,skipped}) |
 | 设置/维护 | Get·SaveSettings / BackupIndexNow / PreviewGC / RunGC | GC 两步确认;孤儿只报告 |
 
 **事件接线**:管线的 `Emit` 回调即 `onTransferEvent`——全部事件透传 `runtime.EventsEmit`,其中 `index:changed` 同时驱动壳层防抖备份(App 是转发器+消费者,不经 EventsOn 自我订阅)。`drive:switched`(TODO-21)通知前端回根目录、清选择/缩略图/传输列表。startup 事件先于前端订阅即丢失 → 前端 `store.init()` 主动拉初值。

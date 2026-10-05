@@ -48,6 +48,26 @@ func (a *App) PickDir() (dir string, err error) {
 	return dir, nil
 }
 
+// PickDirs 打开多选目录对话框(上传文件夹,TODO-23);取消返回空表(前端按"未选择"处理)。
+// 对话框本体在 fork 的 wails 里(tag v2.15.0-kist.1,go.mod replace),
+// 上游 OpenDirectoryDialog 单选写死,详见 docs/todo/23-multi-dir-dialog.md。
+func (a *App) PickDirs() (paths []string, err error) {
+	defer a.panicGuard(&err)
+	if a.ctx == nil {
+		return nil, a.wrap(errs.New(errs.Internal, "窗口尚未就绪"))
+	}
+	paths, err = wruntime.OpenMultipleDirectoriesDialog(a.ctx, wruntime.OpenDialogOptions{
+		Title: "选择要上传的文件夹",
+	})
+	if err != nil {
+		return nil, a.wrap(errs.New(errs.BadConfig, err.Error()))
+	}
+	if paths == nil {
+		paths = []string{}
+	}
+	return paths, nil
+}
+
 // PickImageFile 打开单选图片对话框(GUI 导入文件封面,TODO-17);取消返回空串。
 // 过滤器与 MakeThumbnail 的嗅探范围一致(jpeg/png/gif/bmp/webp)。
 func (a *App) PickImageFile() (path string, err error) {

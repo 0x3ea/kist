@@ -901,7 +901,8 @@ export function goTransfers() {
 
 export async function upload(kind: 'files' | 'folder') {
   try {
-    const paths = kind === 'files' ? await API.PickFiles() : [await API.PickDir()]
+    // 文件夹走多选目录对话框(空表=取消,静默返回);核心管线一目录一任务(叶子打包)
+    const paths = kind === 'files' ? await API.PickFiles() : await API.PickDirs()
     const picked = paths.filter((p) => p)
     if (picked.length === 0) return
     const n = await API.UploadPaths(picked, store.folder.id)
