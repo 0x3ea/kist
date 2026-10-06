@@ -491,17 +491,37 @@ export function summaryOf(folderID: number): index.FolderSummary | undefined {
   return store.folder.summaries[String(folderID)]
 }
 
-/** 目录行摘要:CLI summaryLine 同款措辞(N 话 · 大小 · ← 时间 · 待传) */
-export function summaryText(folderID: number): string {
+/** 摘要构成:main = N 话 · 大小 · 待传;time = 子树最新时间。
+ * 拆开是因为列表视图时间有独立列,内联在摘要里会随前缀宽度参差不齐。 */
+function summaryParts(folderID: number): { main: string[]; time: string } {
   const s = summaryOf(folderID)
-  if (!s) return ''
-  const parts: string[] = []
-  if (s.PackCount > 0) parts.push(`${s.PackCount} 话`)
-  else if (s.FileCount > 0) parts.push(`${s.FileCount} 文件`)
-  if (s.TotalSize > 0) parts.push(humanSize(s.TotalSize))
-  if (s.LatestAt > 0) parts.push(`← ${shortTime(s.LatestAt)}`)
-  if (s.PendingCount > 0) parts.push(`待传 ${s.PendingCount}`)
-  return parts.join(' · ')
+  const main: string[] = []
+  let time = ''
+  if (s) {
+    if (s.PackCount > 0) main.push(`${s.PackCount} 话`)
+    else if (s.FileCount > 0) main.push(`${s.FileCount} 文件`)
+    if (s.TotalSize > 0) main.push(humanSize(s.TotalSize))
+    if (s.LatestAt > 0) time = shortTime(s.LatestAt)
+    if (s.PendingCount > 0) main.push(`待传 ${s.PendingCount}`)
+  }
+  return { main, time }
+}
+
+/** 目录行摘要(卡片视图):CLI summaryLine 同款单行措辞(N 话 · 大小 · ← 时间 · 待传) */
+export function summaryText(folderID: number): string {
+  const { main, time } = summaryParts(folderID)
+  if (time) main.push(`← ${time}`)
+  return main.join(' · ')
+}
+
+/** 目录行摘要(列表视图):不含时间——时间走独立「修改时间」列对齐 */
+export function folderSummaryText(folderID: number): string {
+  return summaryParts(folderID).main.join(' · ')
+}
+
+/** 列表视图目录行的时间列:目录自身 ModifiedAt 恒为 0,展示子树最新时间 */
+export function folderTimeText(folderID: number): string {
+  return summaryParts(folderID).time
 }
 
 /** 封面 dataURL(带缓存 + 有界并发队列);取不到返回空串(调用方显示占位)。

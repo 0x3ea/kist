@@ -1,5 +1,5 @@
 // format.ts — 展示格式化,与 CLI(kistctl)同款规则:humanSize 的 KB/MB/GB
-// 一位小数、shortTime 一年内省年份。摘要行与传输页共用。
+// 一位小数、shortTime 统一年月日不省年份。摘要行与传输页共用。
 
 export function humanSize(n: number): string {
   if (n >= 1 << 30) return (n / (1 << 30)).toFixed(1) + 'GB'
@@ -8,15 +8,11 @@ export function humanSize(n: number): string {
   return `${n}B`
 }
 
-/** 一年内省年份(“← 08-01”形态),更早带年份 */
+/** 统一年月日(“← 2025-08-01”形态),不省年份 */
 export function shortTime(unix: number): string {
   if (!unix) return ''
   const d = new Date(unix * 1000)
-  const now = new Date()
   const two = (v: number) => String(v).padStart(2, '0')
-  if (d.getFullYear() === now.getFullYear()) {
-    return `${two(d.getMonth() + 1)}-${two(d.getDate())}`
-  }
   return `${d.getFullYear()}-${two(d.getMonth() + 1)}-${two(d.getDate())}`
 }
 

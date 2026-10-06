@@ -135,7 +135,7 @@ kistctl backup                            # 把索引加密备份到网盘(重�
 
 ```bash
 kistctl ls /漫画                          # 目录行附子树摘要:
-                                          #   D 作品A/  12 话 · 8.2GB · ← 08-01,待传 2
+                                          #   D 作品A/  12 话 · 8.2GB · ← 2025-08-01,待传 2
 kistctl meta set /漫画/作品A --tag "科幻,已完结" --note "作者:某人"
 kistctl meta set /漫画/作品A              # 不带 flag = 查看当前元数据
 kistctl meta set 3f9c --tag "作者:某人"    # 文件形态的作品:目标用 uuid|id,

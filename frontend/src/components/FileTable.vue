@@ -5,7 +5,7 @@
 // = 进入,名称链接保留为即时进入的捷径);Ctrl/⌘+单击 = 多选切换,不清
 // 其余、不动面板,目录侧立即生效免双击判定。
 import { index } from '../../wailsjs/go/models'
-import { store, summaryText, openDetail, openFolderDetail, selectOnly, ctrlToggleSelect, isMultiSelectClick } from '../store'
+import { store, folderSummaryText, folderTimeText, openDetail, openFolderDetail, selectOnly, ctrlToggleSelect, isMultiSelectClick } from '../store'
 import { humanSize, shortTime } from '../format'
 import { fileKind, folderKind } from '../fileIcon'
 
@@ -116,10 +116,11 @@ function stateTag(e: index.Entry): string {
           <em v-if="stateTag(e)" class="tag">{{ stateTag(e) }}</em>
         </td>
         <td class="c-size dim">
-          <template v-if="e.IsFolder">{{ summaryText(e.ID) }}</template>
+          <template v-if="e.IsFolder">{{ folderSummaryText(e.ID) }}</template>
           <template v-else>{{ humanSize(e.Size) }}</template>
         </td>
-        <td class="c-time dim">{{ shortTime(e.ModifiedAt) }}</td>
+        <!-- 目录自身 ModifiedAt 恒为 0,时间列展示子树最新时间(LatestAt) -->
+        <td class="c-time dim">{{ e.IsFolder ? folderTimeText(e.ID) : shortTime(e.ModifiedAt) }}</td>
       </tr>
       <tr v-if="store.folder.entries.length === 0">
         <td colspan="5" class="empty">空目录——用右上角按钮上传,或拖入文件夹</td>
@@ -176,7 +177,7 @@ tbody tr:hover td {
 }
 
 .c-time {
-  width: 90px;
+  width: 104px; /* 容纳 2025-10-02 全格式不截断 */
 }
 
 .c-name .link {

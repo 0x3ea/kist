@@ -957,7 +957,7 @@ func cmdLs(args []string) error {
 	return nil
 }
 
-// summaryLine 渲染子树摘要:"12 话 · 8.2GB · ← 08-01,待传 2"。
+// summaryLine 渲染子树摘要:"12 话 · 8.2GB · ← 2025-08-01,待传 2"。
 // 索引层(FolderSummary)只报计数,领域措辞在这一层落定:
 // PackCount>0 视为打包作品按"话"措辞,否则"个文件"——对相册/专辑原样适用。
 func summaryLine(s index.FolderSummary) string {
@@ -996,13 +996,9 @@ func humanSize(n int64) string {
 	}
 }
 
-// shortTime 一年内省年份,更早带年份——摘要里的"← 08-01"形态。
+// shortTime 统一年月日不省年份——摘要里的"← 2025-08-01"形态,与 GUI 同款。
 func shortTime(unix int64) string {
-	t := time.Unix(unix, 0)
-	if t.Year() == time.Now().Year() {
-		return t.Format("01-02")
-	}
-	return t.Format("2006-01-02")
+	return time.Unix(unix, 0).Format("2006-01-02")
 }
 
 func cmdSearch(args []string) error {
